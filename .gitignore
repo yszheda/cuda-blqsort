@@ -1,0 +1,26 @@
+# Temporary / backup files
+*.pyc
+*.pyo
+*~
+*.swp
+*.swo
+*.bak
+
+# Build artifacts
+build/
+*.o
+*.so
+*.dll
+*.exe
+
+# IDE
+.vscode/
+.idea/
+*.sublime-*
+
+# Claude session files
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
