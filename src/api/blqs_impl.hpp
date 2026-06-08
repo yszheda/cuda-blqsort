@@ -2,6 +2,7 @@
 // All kernel definitions are in blqs_kernels.hpp (header-only)
 #pragma once
 #include <cuda_runtime.h>
+#include <algorithm>
 #include "blqs_config.hpp"
 #include "blqs_errors.hpp"
 #include "blqs_kernels.hpp"
@@ -16,7 +17,7 @@ void sort_driver(T* d_data, int n, Comparator cmp) {
     if (n <= 1) return;
 
     if (n <= BLOCK_SIZE) {
-        int threads = min(n, BLOCK_SIZE);
+        int threads = std::min(n, BLOCK_SIZE);
         int blocks = 1;
         quicksort_shared<T, 1024, Comparator><<<blocks, threads>>>(d_data, n, cmp);
         CUDA_CHECK(cudaDeviceSynchronize());
@@ -43,7 +44,7 @@ void sort_driver(T* d_data, int n, Comparator cmp) {
 
     for (int b = 0; b < num_blocks; b++) {
         int chunk_start = b * BLOCK_SIZE;
-        int chunk_size = min(BLOCK_SIZE, n - chunk_start);
+        int chunk_size = std::min(BLOCK_SIZE, n - chunk_start);
         int lower_count = h_bucket_counts[b * num_buckets + 0];
 
         if (lower_count > 1) sort_driver(d_data + chunk_start, lower_count, cmp);
@@ -66,7 +67,7 @@ void sort_by_key_driver(K* d_keys, V* d_values, int n, Comparator cmp) {
     if (n <= 1) return;
 
     if (n <= BLOCK_SIZE) {
-        int threads = min(n, BLOCK_SIZE);
+        int threads = std::min(n, BLOCK_SIZE);
         kv_block_sort_kernel<K, V, Comparator><<<1, threads>>>(d_keys, d_values, n, cmp);
         CUDA_CHECK(cudaDeviceSynchronize());
         return;
@@ -91,7 +92,7 @@ void sort_by_key_driver(K* d_keys, V* d_values, int n, Comparator cmp) {
 
     for (int b = 0; b < num_blocks; b++) {
         int chunk_start = b * BLOCK_SIZE;
-        int chunk_size = min(BLOCK_SIZE, n - chunk_start);
+        int chunk_size = std::min(BLOCK_SIZE, n - chunk_start);
         int lower_count = h_bucket_counts[b * num_buckets + 0];
 
         if (lower_count > 1) sort_by_key_driver(d_keys + chunk_start, d_values + chunk_start, lower_count, cmp);
