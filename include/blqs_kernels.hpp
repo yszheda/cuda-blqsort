@@ -69,7 +69,7 @@ __global__ void kv_partition_scatter_kernel(
     }
 }
 
-// ── Small-array Quicksort (single block, shared memory) ────────────────────
+// ── Small-array Quicksort (multi-thread cooperative, shared memory) ────────
 
 template <typename T>
 __device__ void insertion_sort_dev(T* data, int n) {
@@ -81,82 +81,290 @@ __device__ void insertion_sort_dev(T* data, int n) {
     }
 }
 
+// Multi-thread cooperative partition: all threads participate
+// Returns the pivot index
 template <typename T>
-__device__ T partition_block_dev(T* data, int low, int high) {
-    T pivot = data[high];
-    int i = low - 1;
-    for (int j = low; j < high; j++) {
-        if (!(pivot < data[j])) { i++; T t = data[i]; data[i] = data[j]; data[j] = t; }
+__device__ int partition_block_mt(T* data, int lo, int hi, int block_threads) {
+    T pivot = data[hi];
+    int count = hi - lo + 1; // elements to partition
+
+    // Each thread counts how many of its elements go left of pivot
+    int local_less = 0, local_ge = 0;
+    for (int i = threadIdx.x; i < count; i += block_threads) {
+        if (data[lo + i] < pivot) local_less++;
+        else local_ge++;
     }
-    T t = data[i + 1]; data[i + 1] = data[high]; data[high] = t;
-    return i + 1;
+
+    // Block-wide prefix sum to get global offsets
+    __shared__ int s_less_total[1];
+    __shared__ int s_ge_total[1];
+
+    // Use warp-level ballot for fast sum (works for any block size)
+    __shared__ int s_less[1024]; // per-thread partial
+    __shared__ int s_ge[1024];
+    s_less[threadIdx.x] = local_less;
+    s_ge[threadIdx.x] = local_ge;
+    __syncthreads();
+
+    if (threadIdx.x == 0) {
+        int lt = 0, gt = 0;
+        for (int i = 0; i < block_threads && i < count; i++) {
+            lt += s_less[i];
+            gt += s_ge[i];
+        }
+        s_less_total[0] = lt;
+        s_ge_total[0] = gt;
+    }
+    __syncthreads();
+
+    // Compute per-thread starting offset (prefix sum of partials)
+    __shared__ int s_less_offset[1024];
+    __shared__ int s_ge_offset[1024];
+    if (threadIdx.x == 0) {
+        int lt = 0, gt = 0;
+        for (int i = 0; i < block_threads && i < count; i++) {
+            s_less_offset[i] = lt;
+            s_ge_offset[i] = gt;
+            lt += s_less[i];
+            gt += s_ge[i];
+        }
+    }
+    __syncthreads();
+
+    // Scatter to temp buffer
+    __shared__ T s_tmp[1024];
+    int less_off = s_less_offset[threadIdx.x];
+    int ge_off = s_ge_offset[threadIdx.x];
+    for (int i = threadIdx.x; i < count; i += block_threads) {
+        if (data[lo + i] < pivot) {
+            s_tmp[less_off] = data[lo + i];
+            less_off += block_threads;
+        } else {
+            s_tmp[s_less_total[0] + ge_off] = data[lo + i];
+            ge_off += block_threads;
+        }
+    }
+    __syncthreads();
+
+    // Copy back
+    for (int i = threadIdx.x; i < count; i += block_threads) {
+        data[lo + i] = s_tmp[i];
+    }
+    __syncthreads();
+
+    return lo + s_less_total[0]; // pivot index (first >= pivot)
 }
 
 template <typename T, int MaxSize = 1024>
 __global__ void quicksort_shared_kernel(T* data, int n) {
     __shared__ T sdata[MaxSize];
     int tid = threadIdx.x;
+    int block_threads = blockDim.x;
     if (tid < n) sdata[tid] = data[tid];
     __syncthreads();
 
-    // Only thread 0 performs the sort in shared memory
-    if (tid == 0) {
-        constexpr int STACK_DEPTH = 20;
-        int s_low[STACK_DEPTH], s_high[STACK_DEPTH], top = -1;
-        s_low[++top] = 0; s_high[top] = n - 1;
+    // Cooperative iterative quicksort
+    constexpr int STACK_DEPTH = 20;
+    __shared__ int s_low[STACK_DEPTH], s_high[STACK_DEPTH];
+    __shared__ int s_top;
 
-        while (top >= 0) {
-            int lo = s_low[top], hi = s_high[top--];
-            if (lo >= hi) continue;
-            if (hi - lo + 1 <= BASE_CASE_THRESHOLD) {
-                insertion_sort_dev(sdata + lo, hi - lo + 1);
-                continue;
-            }
-            int pi = partition_block_dev(sdata, lo, hi);
-            s_low[++top] = lo; s_high[top] = pi - 1;
-            s_low[++top] = pi + 1; s_high[top] = hi;
-        }
-    }
+    if (tid == 0) { s_low[0] = 0; s_high[0] = n - 1; s_top = 0; }
     __syncthreads();
+
+    while (true) {
+        int lo, hi;
+        if (tid == 0) {
+            if (s_top < 0) { lo = -1; hi = -1; }
+            else { lo = s_low[s_top]; hi = s_high[s_top]; s_top--; }
+        }
+        // Broadcast lo, hi to all threads
+        lo = __shfl_sync(0xFFFFFFFF, lo, 0);
+        hi = __shfl_sync(0xFFFFFFFF, hi, 0);
+        if (lo < 0 || lo >= hi) break;
+
+        if (hi - lo + 1 <= BASE_CASE_THRESHOLD) {
+            // Small: thread 0 does insertion sort
+            if (tid == 0) insertion_sort_dev(sdata + lo, hi - lo + 1);
+            __syncthreads();
+            continue;
+        }
+
+        // Cooperative partition
+        int pi = partition_block_mt(sdata, lo, hi, block_threads);
+        // pi is the first element >= pivot; pivot itself is at hi
+        // Need to place pivot at pi
+        T pivot_val = sdata[hi];
+        if (pi < hi) {
+            // Swap sdata[pi] and sdata[hi] only if needed
+            // Actually the partition already put >= elements starting at pi
+            // The pivot value may have moved; find it and put it at pi
+            for (int i = pi; i <= hi; i++) {
+                if (sdata[i] == pivot_val) {
+                    T tmp = sdata[i]; sdata[i] = sdata[pi]; sdata[pi] = tmp;
+                    break;
+                }
+            }
+        }
+
+        // Push sub-ranges to stack (larger first for better cache behavior)
+        int left_size = pi - lo;
+        int right_size = hi - pi;
+        if (tid == 0) {
+            if (left_size > 1 && right_size > 1) {
+                if (left_size > right_size) {
+                    s_top++; s_low[s_top] = lo; s_high[s_top] = pi - 1;
+                    s_top++; s_low[s_top] = pi + 1; s_high[s_top] = hi;
+                } else {
+                    s_top++; s_low[s_top] = pi + 1; s_high[s_top] = hi;
+                    s_top++; s_low[s_top] = lo; s_high[s_top] = pi - 1;
+                }
+            } else if (left_size > 1) {
+                s_top++; s_low[s_top] = lo; s_high[s_top] = pi - 1;
+            } else if (right_size > 1) {
+                s_top++; s_low[s_top] = pi + 1; s_high[s_top] = hi;
+            }
+        }
+        __syncthreads();
+    }
+
     if (tid < n) data[tid] = sdata[tid];
 }
 
-// ── KV Block Sort ──────────────────────────────────────────────────────────
+// ── KV Block Sort (multi-thread cooperative) ───────────────────────────────
+
+template <typename K, typename V>
+__device__ int kv_partition_block_mt(K* keys, V* values, int lo, int hi, int block_threads) {
+    K pivot = keys[hi];
+    int count = hi - lo + 1;
+
+    int local_less = 0, local_ge = 0;
+    for (int i = threadIdx.x; i < count; i += block_threads) {
+        if (keys[lo + i] < pivot) local_less++;
+        else local_ge++;
+    }
+
+    __shared__ int s_less[1024];
+    __shared__ int s_ge[1024];
+    __shared__ int s_less_total[1];
+    __shared__ int s_less_offset[1024];
+    __shared__ int s_ge_offset[1024];
+    s_less[threadIdx.x] = local_less;
+    s_ge[threadIdx.x] = local_ge;
+    __syncthreads();
+
+    if (threadIdx.x == 0) {
+        int lt = 0, gt = 0;
+        for (int i = 0; i < block_threads && i < count; i++) {
+            s_less_offset[i] = lt;
+            s_ge_offset[i] = gt;
+            lt += s_less[i];
+            gt += s_ge[i];
+        }
+        s_less_total[0] = lt;
+    }
+    __syncthreads();
+
+    __shared__ K sk_tmp[1024];
+    __shared__ V sv_tmp[1024];
+    int less_off = s_less_offset[threadIdx.x];
+    int ge_off = s_ge_offset[threadIdx.x];
+    for (int i = threadIdx.x; i < count; i += block_threads) {
+        if (keys[lo + i] < pivot) {
+            sk_tmp[less_off] = keys[lo + i];
+            sv_tmp[less_off] = values[lo + i];
+            less_off += block_threads;
+        } else {
+            sk_tmp[s_less_total[0] + ge_off] = keys[lo + i];
+            sv_tmp[s_less_total[0] + ge_off] = values[lo + i];
+            ge_off += block_threads;
+        }
+    }
+    __syncthreads();
+    for (int i = threadIdx.x; i < count; i += block_threads) {
+        keys[lo + i] = sk_tmp[i];
+        values[lo + i] = sv_tmp[i];
+    }
+    __syncthreads();
+
+    return lo + s_less_total[0];
+}
 
 template <typename K, typename V>
 __global__ void kv_block_sort_kernel(K* keys, V* values, int n) {
     int tid = threadIdx.x;
+    int block_threads = blockDim.x;
     __shared__ K sk[1024];
     __shared__ V sv[1024];
     if (tid < n) { sk[tid] = keys[tid]; sv[tid] = values[tid]; }
     __syncthreads();
 
-    // Only thread 0 sorts
-    if (tid == 0) {
-        constexpr int STACK_DEPTH = 20;
-        int sl[STACK_DEPTH], sh[STACK_DEPTH], top = -1;
-        sl[++top] = 0; sh[top] = n - 1;
+    constexpr int STACK_DEPTH = 20;
+    __shared__ int sl[STACK_DEPTH], sh[STACK_DEPTH], s_top;
 
-        while (top >= 0) {
-            int lo = sl[top], hi = sh[top--];
-            if (lo >= hi) continue;
-            K pivot = sk[hi];
-            int i = lo - 1;
-            for (int j = lo; j < hi; j++) {
-                if (!(pivot < sk[j])) {
-                    i++;
-                    K tk = sk[i]; sk[i] = sk[j]; sk[j] = tk;
-                    V tv = sv[i]; sv[i] = sv[j]; sv[j] = tv;
+    if (tid == 0) { sl[0] = 0; sh[0] = n - 1; s_top = 0; }
+    __syncthreads();
+
+    while (true) {
+        int lo, hi;
+        if (tid == 0) {
+            if (s_top < 0) { lo = -1; hi = -1; }
+            else { lo = sl[s_top]; hi = sh[s_top]; s_top--; }
+        }
+        lo = __shfl_sync(0xFFFFFFFF, lo, 0);
+        hi = __shfl_sync(0xFFFFFFFF, hi, 0);
+        if (lo < 0 || lo >= hi) break;
+
+        if (hi - lo + 1 <= BASE_CASE_THRESHOLD) {
+            if (tid == 0) {
+                for (int i = 1; i <= hi - lo; i++) {
+                    K k = sk[lo + i];
+                    V v = sv[lo + i];
+                    int j = i - 1;
+                    while (j >= 0 && k < sk[lo + j]) {
+                        sk[lo + j + 1] = sk[lo + j];
+                        sv[lo + j + 1] = sv[lo + j];
+                        j--;
+                    }
+                    sk[lo + j + 1] = k;
+                    sv[lo + j + 1] = v;
                 }
             }
-            i++;
-            K tk = sk[i]; sk[i] = sk[hi]; sk[hi] = tk;
-            V tv = sv[i]; sv[i] = sv[hi]; sv[hi] = tv;
-            sl[++top] = lo; sh[top] = i - 1;
-            sl[++top] = i + 1; sh[top] = hi;
+            __syncthreads();
+            continue;
         }
+
+        int pi = kv_partition_block_mt(sk, sv, lo, hi, block_threads);
+        K pivot_val = sk[hi];
+        if (pi < hi) {
+            for (int i = pi; i <= hi; i++) {
+                if (sk[i] == pivot_val) {
+                    K tk = sk[i]; sk[i] = sk[pi]; sk[pi] = tk;
+                    V tv = sv[i]; sv[i] = sv[pi]; sv[pi] = tv;
+                    break;
+                }
+            }
+        }
+
+        int left_size = pi - lo;
+        int right_size = hi - pi;
+        if (tid == 0) {
+            if (left_size > 1 && right_size > 1) {
+                if (left_size > right_size) {
+                    s_top++; sl[s_top] = lo; sh[s_top] = pi - 1;
+                    s_top++; sl[s_top] = pi + 1; sh[s_top] = hi;
+                } else {
+                    s_top++; sl[s_top] = pi + 1; sh[s_top] = hi;
+                    s_top++; sl[s_top] = lo; sh[s_top] = pi - 1;
+                }
+            } else if (left_size > 1) {
+                s_top++; sl[s_top] = lo; sh[s_top] = pi - 1;
+            } else if (right_size > 1) {
+                s_top++; sl[s_top] = pi + 1; sh[s_top] = hi;
+            }
+        }
+        __syncthreads();
     }
-    __syncthreads();
+
     if (tid < n) { keys[tid] = sk[tid]; values[tid] = sv[tid]; }
 }
 
