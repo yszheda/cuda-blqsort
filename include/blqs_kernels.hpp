@@ -25,12 +25,10 @@ __global__ void partition_kernel(
 
     __shared__ T pivot;
     __shared__ int chunk_start;
-    __shared__ int chunk_size;
 
     if (threadIdx.x == 0) {
         chunk_start = blockIdx.x * blockDim.x;
         int cs = (n - chunk_start < BLOCK_SIZE) ? (n - chunk_start) : BLOCK_SIZE;
-        chunk_size = cs;
         // Median-of-three pivot
         int a = chunk_start, b = chunk_start + cs / 2, c = chunk_start + cs - 1;
         T va = data[a], vb = data[b], vc = data[c];
@@ -41,7 +39,14 @@ __global__ void partition_kernel(
 
     T val = data[tid];
     int bucket = (val < pivot) ? 0 : 1;
+
+    // Phase 1: Count (atomic increments)
     int pos = atomicAdd(&bucket_counts[blockIdx.x * num_buckets + bucket], 1);
+
+    // Synchronize: all threads must finish counting before reading offsets
+    __syncthreads();
+
+    // Phase 2: Scatter (bucket 0 count is now final)
     int offset = (bucket == 0) ? chunk_start
                                : chunk_start + bucket_counts[blockIdx.x * num_buckets + 0];
     data[offset + pos] = val;
@@ -57,12 +62,10 @@ __global__ void kv_partition_kernel(
 
     __shared__ K pivot;
     __shared__ int chunk_start;
-    __shared__ int chunk_size;
 
     if (threadIdx.x == 0) {
         chunk_start = blockIdx.x * blockDim.x;
         int cs = (n - chunk_start < BLOCK_SIZE) ? (n - chunk_start) : BLOCK_SIZE;
-        chunk_size = cs;
         int a = chunk_start, b = chunk_start + cs / 2, c = chunk_start + cs - 1;
         K va = keys[a], vb = keys[b], vc = keys[c];
         if (vc < va) { if (va < vb) pivot = va; else if (vc < vb) pivot = vc; else pivot = vb; }
@@ -73,7 +76,13 @@ __global__ void kv_partition_kernel(
     K key = keys[tid];
     V val = values[tid];
     int bucket = (key < pivot) ? 0 : 1;
+
+    // Phase 1: Count
     int pos = atomicAdd(&bucket_counts[blockIdx.x * num_buckets + bucket], 1);
+
+    // Phase 2: Scatter (after sync)
+    __syncthreads();
+
     int offset = (bucket == 0) ? chunk_start
                                : chunk_start + bucket_counts[blockIdx.x * num_buckets + 0];
     keys[offset + pos] = key;
