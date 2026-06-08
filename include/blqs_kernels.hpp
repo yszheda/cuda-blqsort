@@ -334,5 +334,3 @@ void radix_sort_driver(K* d_keys, V* d_values, int n) {
 } // namespace blqs
 
 #endif // __CUDACC__
-
-#endif // __CUDACC__

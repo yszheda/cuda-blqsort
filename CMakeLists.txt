@@ -47,8 +47,7 @@ add_library(cuda_blqsort
     src/kernels/block_sort.cu
     src/kernels/radix_sort.cu
     src/kernels/merge.cu
-    src/api/blqs_impl.cu
-    src/api/blqs_keyvalue_impl.cu
+    src/api/blqs_api.cu
 )
 # Enable separate compilation for relocatable device code (kernel template linking)
 set_target_properties(cuda_blqsort PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
