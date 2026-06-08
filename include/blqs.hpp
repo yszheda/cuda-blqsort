@@ -38,6 +38,7 @@ extern template void sort_stable<double,    int (*)(const double&, const double&
 // sort_by_key
 extern template void sort_by_key<int, int>(int*, int*, int);
 extern template void sort_by_key<float, int>(float*, int*, int);
+extern template void sort_by_key<float, float>(float*, float*, int);
 extern template void sort_by_key<int64_t, int64_t>(int64_t*, int64_t*, int);
 extern template void sort_by_key<double, double>(double*, double*, int);
 

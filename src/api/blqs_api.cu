@@ -137,6 +137,7 @@ template void sort_stable<double, dbl_cmp>(double*, int, dbl_cmp);
 
 template void sort_by_key<int, int>(int*, int*, int);
 template void sort_by_key<float, int>(float*, int*, int);
+template void sort_by_key<float, float>(float*, float*, int);
 template void sort_by_key<int64_t, int64_t>(int64_t*, int64_t*, int);
 template void sort_by_key<double, double>(double*, double*, int);
 
