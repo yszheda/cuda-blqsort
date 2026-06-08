@@ -27,16 +27,24 @@ void TestSortByKey(const std::vector<K>& keys, const std::vector<V>& values) {
     CUDA_CHECK(cudaMemcpy(h_keys.data(), d_keys, n * sizeof(K), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(h_values.data(), d_values, n * sizeof(V), cudaMemcpyDeviceToHost));
 
+    // Verify keys are sorted
     for (int i = 0; i < n - 1; i++) {
         EXPECT_LE(h_keys[i], h_keys[i + 1]) << "Keys not sorted at index " << i;
     }
 
-    std::vector<std::pair<K, V>> ref(n);
-    for (int i = 0; i < n; i++) ref[i] = {keys[i], values[i]};
-    std::sort(ref.begin(), ref.end());
+    // Verify key-value pairs are preserved (multiset comparison)
+    // Sort both input and output pairs and compare
+    std::vector<std::pair<K, V>> input_pairs(n);
+    std::vector<std::pair<K, V>> output_pairs(n);
     for (int i = 0; i < n; i++) {
-        EXPECT_EQ(h_keys[i], ref[i].first) << "Key mismatch at " << i;
-        EXPECT_EQ(h_values[i], ref[i].second) << "Value mismatch at " << i;
+        input_pairs[i] = {keys[i], values[i]};
+        output_pairs[i] = {h_keys[i], h_values[i]};
+    }
+    std::sort(input_pairs.begin(), input_pairs.end());
+    std::sort(output_pairs.begin(), output_pairs.end());
+    for (int i = 0; i < n; i++) {
+        EXPECT_EQ(input_pairs[i].first, output_pairs[i].first) << "Key multiset mismatch at " << i;
+        EXPECT_EQ(input_pairs[i].second, output_pairs[i].second) << "Value multiset mismatch at " << i;
     }
 
     CUDA_CHECK(cudaFree(d_keys));

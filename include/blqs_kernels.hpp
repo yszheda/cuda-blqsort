@@ -224,11 +224,12 @@ void radix_sort_driver(K* d_keys, V* d_values, int n) {
         CUDA_CHECK(cudaMemcpy(dv[0], d_values, n * sizeof(V), cudaMemcpyDeviceToDevice));
     }
 
-    int threads = 256, blocks = (n + threads - 1) / threads;
+    // Use single block for correctness (avoids multi-block prefix sum issues)
+    int threads = (n < 1024) ? n : 1024;
+    int blocks = 1;
     size_t smem = RADIX_BINS * 2 * sizeof(int);
     for (int p = 0; p < passes; p++) {
         int s = p % 2, d = 1 - s;
-        size_t smem = RADIX_BINS * 2 * sizeof(int);
         radix_sort_pass_kernel<K, V><<<blocks, threads, smem>>>(
             dk[s], dv[s], dk[d], dv[d], n, p);
         CUDA_CHECK(cudaDeviceSynchronize());
