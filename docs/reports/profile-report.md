@@ -34,6 +34,12 @@ To enable profiling, run: `sudo sh -c 'echo N >/proc/driver/nvidia/params'` or c
 3. **Host Recursion Overhead**: Each partition requires device-host roundtrip
 4. **Radix Sort Not Stable**: Radix sort with atomicAdd doesn't preserve order; stable sort falls back to host-side std::stable_sort
 
+## A40 Server
+
+- **A40**: 33/33 tests PASS in 11.38s (vs Thor's 47.77s)
+- **CUDA**: 13.1 on A40 (vs 13.0 on Thor)
+- **Compiler**: GCC 13.3.0, NVCC 13.1
+
 ## Optimization Roadmap
 
 The codebase is structured for iterative optimization with clear extension points:

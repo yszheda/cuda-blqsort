@@ -18,6 +18,11 @@
 | 100,000 | 4,249.661 | 0.00 |
 | 1,000,000 | 54,111.234 | 0.00 |
 
+## A40 Server Timing (11s total test time)
+
+The A40 server runs tests 4.4x faster than Thor (11s vs 48s for 33 tests),
+indicating different GPU architecture characteristics.
+
 ## Analysis
 
 The current implementation is functionally correct (33/33 tests pass on both Thor and A40 GPU servers) but performance is suboptimal for the baseline implementation. The primary bottleneck is:
