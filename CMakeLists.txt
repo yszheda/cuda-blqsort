@@ -9,6 +9,9 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 # Auto-detect GPU architecture
 set(CMAKE_CUDA_ARCHITECTURES "native")
 
+# CUDA compiler flags
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --extended-lambda")
+
 # Find CUDA toolkit (support non-standard paths)
 find_package(CUDAToolkit REQUIRED)
 

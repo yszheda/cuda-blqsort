@@ -22,5 +22,13 @@ void sort_driver(T* d_data, int n, Comparator cmp);
 template <typename T, typename Comparator>
 void stable_merge_sort(T* d_data, int n, Comparator cmp);
 
+// Radix sort driver (defined in radix_sort.cu)
+template <typename K, typename V>
+void radix_sort_driver(K* d_keys, V* d_values, int n);
+
+// Stable KV sort driver (defined in blqs_keyvalue_impl.cu)
+template <typename K, typename V>
+void stable_sort_by_key_driver(K* d_keys, V* d_values, int n);
+
 } // namespace detail
 } // namespace blqs
