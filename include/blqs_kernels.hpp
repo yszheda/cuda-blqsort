@@ -99,7 +99,9 @@ __global__ void quicksort_shared_kernel(T* data, int n) {
     if (tid < n) sdata[tid] = data[tid];
     __syncthreads();
 
-    int s_low[MaxSize], s_high[MaxSize], top = -1;
+    // Stack size: max recursion depth is log2(MaxSize)
+    constexpr int STACK_DEPTH = 20; // 2^20 > 1024
+    int s_low[STACK_DEPTH], s_high[STACK_DEPTH], top = -1;
     s_low[++top] = 0; s_high[top] = n - 1;
 
     while (top >= 0) {
@@ -127,7 +129,8 @@ __global__ void kv_block_sort_kernel(K* keys, V* values, int n) {
     if (tid < n) { sk[tid] = keys[tid]; sv[tid] = values[tid]; }
     __syncthreads();
 
-    int sl[1024], sh[1024], top = -1;
+    constexpr int STACK_DEPTH = 20;
+    int sl[STACK_DEPTH], sh[STACK_DEPTH], top = -1;
     sl[++top] = 0; sh[top] = n - 1;
 
     while (top >= 0) {
@@ -180,37 +183,12 @@ __global__ void radix_sort_pass_kernel(
     int* s_cnt = s_mem;
     int* s_off = s_mem + RADIX_BINS;
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int lane = threadIdx.x & 31;
-    int wid = threadIdx.x >> 5;
-    int num_warps = (blockDim.x + 31) >> 5;
 
-    // Phase 1: Compute digit per thread
-    int digit = (tid < n) ? get_radix_digit(in_k[tid], pass) : 0;
-
-    // Phase 2: Per-warp histogram using ballot
-    // For each digit value, count how many threads in each warp have that digit
-    // Store in shared memory: warp_hist[wid * RADIX_BINS + digit]
-    int* warp_hist = s_mem + RADIX_BINS * 2;
-
-    for (int d = 0; d < RADIX_BINS; d++) {
-        unsigned int mask = __ballot_sync(0xFFFFFFFF, tid < n && digit == d);
-        warp_hist[wid * RADIX_BINS + d] = __popc(mask);
-    }
+    if (threadIdx.x < RADIX_BINS) s_cnt[threadIdx.x] = 0;
+    __syncthreads();
+    if (tid < n) atomicAdd(&s_cnt[get_radix_digit(in_k[tid], pass)], 1);
     __syncthreads();
 
-    // Phase 3: Prefix sum across warps to get global block offsets per digit
-    if (threadIdx.x < RADIX_BINS) {
-        int sum = 0;
-        for (int w = 0; w < num_warps; w++) {
-            int old = sum;
-            sum += warp_hist[w * RADIX_BINS + threadIdx.x];
-            warp_hist[w * RADIX_BINS + threadIdx.x] = old;
-        }
-        s_cnt[threadIdx.x] = sum;
-    }
-    __syncthreads();
-
-    // Phase 4: Prefix sum of s_cnt to get starting offsets per digit
     if (threadIdx.x < RADIX_BINS) {
         int s = 0;
         for (int i = 0; i < threadIdx.x; i++) s += s_cnt[i];
@@ -218,13 +196,11 @@ __global__ void radix_sort_pass_kernel(
     }
     __syncthreads();
 
-    // Phase 5: Scatter with stable position
     if (tid < n) {
-        int d = digit;
-        int pos = s_off[d] + warp_hist[wid * RADIX_BINS + d] +
-                  __popc(__ballot_sync(0xFFFFFFFF, digit == d) & ((1u << lane) - 1));
-        out_k[pos] = in_k[tid];
-        if constexpr (!std::is_same<V, void>::value) out_v[pos] = in_v[tid];
+        int d = get_radix_digit(in_k[tid], pass);
+        int p = atomicAdd(&s_off[d], 1);
+        out_k[p] = in_k[tid];
+        if constexpr (!std::is_same<V, void>::value) out_v[p] = in_v[tid];
     }
 }
 
@@ -244,8 +220,7 @@ void radix_sort_driver(K* d_keys, V* d_values, int n) {
     }
 
     int threads = 256, blocks = (n + threads - 1) / threads;
-    int num_warps = (threads + 31) >> 5;
-    size_t smem = (RADIX_BINS * 2 + num_warps * RADIX_BINS) * sizeof(int);
+    size_t smem = RADIX_BINS * 2 * sizeof(int);
     for (int p = 0; p < passes; p++) {
         int s = p % 2, d = 1 - s;
         size_t smem = RADIX_BINS * 2 * sizeof(int);
