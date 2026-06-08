@@ -99,21 +99,23 @@ __global__ void quicksort_shared_kernel(T* data, int n) {
     if (tid < n) sdata[tid] = data[tid];
     __syncthreads();
 
-    // Stack size: max recursion depth is log2(MaxSize)
-    constexpr int STACK_DEPTH = 20; // 2^20 > 1024
-    int s_low[STACK_DEPTH], s_high[STACK_DEPTH], top = -1;
-    s_low[++top] = 0; s_high[top] = n - 1;
+    // Only thread 0 performs the sort in shared memory
+    if (tid == 0) {
+        constexpr int STACK_DEPTH = 20;
+        int s_low[STACK_DEPTH], s_high[STACK_DEPTH], top = -1;
+        s_low[++top] = 0; s_high[top] = n - 1;
 
-    while (top >= 0) {
-        int lo = s_low[top], hi = s_high[top--];
-        if (lo >= hi) continue;
-        if (hi - lo + 1 <= BASE_CASE_THRESHOLD) {
-            insertion_sort_dev(sdata + lo, hi - lo + 1);
-            continue;
+        while (top >= 0) {
+            int lo = s_low[top], hi = s_high[top--];
+            if (lo >= hi) continue;
+            if (hi - lo + 1 <= BASE_CASE_THRESHOLD) {
+                insertion_sort_dev(sdata + lo, hi - lo + 1);
+                continue;
+            }
+            int pi = partition_block_dev(sdata, lo, hi);
+            s_low[++top] = lo; s_high[top] = pi - 1;
+            s_low[++top] = pi + 1; s_high[top] = hi;
         }
-        int pi = partition_block_dev(sdata, lo, hi);
-        s_low[++top] = lo; s_high[top] = pi - 1;
-        s_low[++top] = pi + 1; s_high[top] = hi;
     }
     __syncthreads();
     if (tid < n) data[tid] = sdata[tid];
@@ -129,27 +131,30 @@ __global__ void kv_block_sort_kernel(K* keys, V* values, int n) {
     if (tid < n) { sk[tid] = keys[tid]; sv[tid] = values[tid]; }
     __syncthreads();
 
-    constexpr int STACK_DEPTH = 20;
-    int sl[STACK_DEPTH], sh[STACK_DEPTH], top = -1;
-    sl[++top] = 0; sh[top] = n - 1;
+    // Only thread 0 sorts
+    if (tid == 0) {
+        constexpr int STACK_DEPTH = 20;
+        int sl[STACK_DEPTH], sh[STACK_DEPTH], top = -1;
+        sl[++top] = 0; sh[top] = n - 1;
 
-    while (top >= 0) {
-        int lo = sl[top], hi = sh[top--];
-        if (lo >= hi) continue;
-        K pivot = sk[hi];
-        int i = lo - 1;
-        for (int j = lo; j < hi; j++) {
-            if (!(pivot < sk[j])) {
-                i++;
-                K tk = sk[i]; sk[i] = sk[j]; sk[j] = tk;
-                V tv = sv[i]; sv[i] = sv[j]; sv[j] = tv;
+        while (top >= 0) {
+            int lo = sl[top], hi = sh[top--];
+            if (lo >= hi) continue;
+            K pivot = sk[hi];
+            int i = lo - 1;
+            for (int j = lo; j < hi; j++) {
+                if (!(pivot < sk[j])) {
+                    i++;
+                    K tk = sk[i]; sk[i] = sk[j]; sk[j] = tk;
+                    V tv = sv[i]; sv[i] = sv[j]; sv[j] = tv;
+                }
             }
+            i++;
+            K tk = sk[i]; sk[i] = sk[hi]; sk[hi] = tk;
+            V tv = sv[i]; sv[i] = sv[hi]; sv[hi] = tv;
+            sl[++top] = lo; sh[top] = i - 1;
+            sl[++top] = i + 1; sh[top] = hi;
         }
-        i++;
-        K tk = sk[i]; sk[i] = sk[hi]; sk[hi] = tk;
-        V tv = sv[i]; sv[i] = sv[hi]; sv[hi] = tv;
-        sl[++top] = lo; sh[top] = i - 1;
-        sl[++top] = i + 1; sh[top] = hi;
     }
     __syncthreads();
     if (tid < n) { keys[tid] = sk[tid]; values[tid] = sv[tid]; }
