@@ -57,21 +57,40 @@ void do_sort(T* d_data, int n) {
     CUDA_CHECK(cudaMemcpy(&h_less_count, d_less_count, sizeof(int), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaFree(d_less_count));
 
-    // Handle degenerate cases (all elements on one side)
+    // Handle degenerate cases (all elements on one side of pivot)
     if (h_less_count == 0 || h_less_count == n) {
-        // Try a different pivot: use the minimum element
-        // For now, just sort the whole thing with shared memory in chunks
-        // Split into BLOCK_SIZE chunks and sort each
-        int num_chunks = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
-        for (int c = 0; c < num_chunks; c++) {
-            int offset = c * BLOCK_SIZE;
-            int chunk_n = (n - offset < BLOCK_SIZE) ? (n - offset) : BLOCK_SIZE;
-            quicksort_shared_kernel<T, 1024><<<1, chunk_n>>>(d_data + offset, chunk_n);
+        // Try again with a different pivot: use the element at index n/4
+        std::vector<T> h_alt(1);
+        CUDA_CHECK(cudaMemcpy(&h_alt[0], d_data + n / 4, sizeof(T), cudaMemcpyDeviceToHost));
+        T pivot2 = h_alt[0];
+
+        int* d_lc2 = nullptr;
+        CUDA_CHECK(cudaMalloc(&d_lc2, sizeof(int)));
+        CUDA_CHECK(cudaMemset(d_lc2, 0, sizeof(int)));
+        count_less_kernel<T><<<blocks, threads>>>(d_data, n, pivot2, d_lc2);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaMemcpy(&h_less_count, d_lc2, sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaFree(d_lc2));
+
+        if (h_less_count > 0 && h_less_count < n) {
+            // Second pivot worked, proceed with scatter
+            int* d_lw = nullptr, *d_gw = nullptr;
+            CUDA_CHECK(cudaMalloc(&d_lw, sizeof(int)));
+            CUDA_CHECK(cudaMalloc(&d_gw, sizeof(int)));
+            CUDA_CHECK(cudaMemset(d_lw, 0, sizeof(int)));
+            CUDA_CHECK(cudaMemset(d_gw, 0, sizeof(int)));
+            partition_scatter_kernel<T><<<blocks, threads>>>(
+                d_data, n, pivot2, h_less_count, d_lw, d_gw);
             CUDA_CHECK(cudaDeviceSynchronize());
+            CUDA_CHECK(cudaFree(d_lw));
+            CUDA_CHECK(cudaFree(d_gw));
+            do_sort(d_data, h_less_count);
+            do_sort(d_data + h_less_count, n - h_less_count);
+            return;
         }
-        // Now merge sorted chunks (simple insertion merge)
-        // For baseline, just sort the whole array with shared memory
-        // This is O(n^2) in worst case but correct
+
+        // Still degenerate: use radix sort as fallback (stable, always works)
+        radix_sort_driver<T, void>(d_data, nullptr, n);
         return;
     }
 
@@ -136,14 +155,36 @@ void do_sort_by_key(K* d_keys, V* d_values, int n) {
     CUDA_CHECK(cudaFree(d_less_count));
 
     if (h_less_count == 0 || h_less_count == n) {
-        // Degenerate: sort in chunks
-        int num_chunks = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
-        for (int c = 0; c < num_chunks; c++) {
-            int offset = c * BLOCK_SIZE;
-            int chunk_n = (n - offset < BLOCK_SIZE) ? (n - offset) : BLOCK_SIZE;
-            kv_block_sort_kernel<K, V><<<1, chunk_n>>>(d_keys + offset, d_values + offset, chunk_n);
+        // Try alternate pivot
+        std::vector<K> h_alt(1);
+        CUDA_CHECK(cudaMemcpy(&h_alt[0], d_keys + n / 4, sizeof(K), cudaMemcpyDeviceToHost));
+        K pivot2 = h_alt[0];
+
+        int* d_lc2 = nullptr;
+        CUDA_CHECK(cudaMalloc(&d_lc2, sizeof(int)));
+        CUDA_CHECK(cudaMemset(d_lc2, 0, sizeof(int)));
+        kv_count_less_kernel<K, V><<<blocks, threads>>>(d_keys, n, pivot2, d_lc2);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaMemcpy(&h_less_count, d_lc2, sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaFree(d_lc2));
+
+        if (h_less_count > 0 && h_less_count < n) {
+            int* d_lw = nullptr, *d_gw = nullptr;
+            CUDA_CHECK(cudaMalloc(&d_lw, sizeof(int)));
+            CUDA_CHECK(cudaMalloc(&d_gw, sizeof(int)));
+            CUDA_CHECK(cudaMemset(d_lw, 0, sizeof(int)));
+            CUDA_CHECK(cudaMemset(d_gw, 0, sizeof(int)));
+            kv_partition_scatter_kernel<K, V><<<blocks, threads>>>(
+                d_keys, d_values, n, pivot2, h_less_count, d_lw, d_gw);
             CUDA_CHECK(cudaDeviceSynchronize());
+            CUDA_CHECK(cudaFree(d_lw));
+            CUDA_CHECK(cudaFree(d_gw));
+            do_sort_by_key(d_keys, d_values, h_less_count);
+            do_sort_by_key(d_keys + h_less_count, d_values + h_less_count, n - h_less_count);
+            return;
         }
+
+        radix_sort_driver<K, V>(d_keys, d_values, n);
         return;
     }
 
