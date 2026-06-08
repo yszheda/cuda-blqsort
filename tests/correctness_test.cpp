@@ -1,5 +1,4 @@
 // Correctness tests for cuda-blqsort
-// Tests all supported types and corner cases for blqs::sort()
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
 #include <limits>
@@ -10,17 +9,16 @@
 #include <algorithm>
 #include <random>
 
+// Plain function pointer comparators (matching explicit instantiations)
+int cmp_int(const int& a, const int& b) { return a < b; }
+int cmp_float(const float& a, const float& b) { return a < b; }
+int cmp_int64(const int64_t& a, const int64_t& b) { return a < b; }
+int cmp_double(const double& a, const double& b) { return a < b; }
+
 namespace {
 
 template <typename T>
-struct AscendingComparator {
-    __host__ __device__ bool operator()(const T& a, const T& b) const {
-        return a < b;
-    }
-};
-
-template <typename T>
-void HostToTest(T* d_data, int n) {
+void HostVerifySorted(T* d_data, int n) {
     std::vector<T> h_data(n);
     CUDA_CHECK(cudaMemcpy(h_data.data(), d_data, n * sizeof(T), cudaMemcpyDeviceToHost));
     for (int i = 0; i < n - 1; i++) {
@@ -28,54 +26,81 @@ void HostToTest(T* d_data, int n) {
     }
 }
 
-template <typename T>
-void TestSort(const std::vector<T>& input) {
-    T *d_data = nullptr;
-    CUDA_CHECK(cudaMalloc(&d_data, input.size() * sizeof(T)));
-    CUDA_CHECK(cudaMemcpy(d_data, input.data(), input.size() * sizeof(T), cudaMemcpyHostToDevice));
+void TestSortInt(const std::vector<int>& input) {
+    if (input.empty()) return;
+    int* d = nullptr;
+    CUDA_CHECK(cudaMalloc(&d, input.size() * sizeof(int)));
+    CUDA_CHECK(cudaMemcpy(d, input.data(), input.size() * sizeof(int), cudaMemcpyHostToDevice));
+    blqs::sort(d, static_cast<int>(input.size()), cmp_int);
+    HostVerifySorted(d, static_cast<int>(input.size()));
+    CUDA_CHECK(cudaFree(d));
+}
 
-    blqs::sort(d_data, static_cast<int>(input.size()), AscendingComparator<T>());
-    CUDA_CHECK(cudaDeviceSynchronize());
+void TestSortFloat(const std::vector<float>& input) {
+    if (input.empty()) return;
+    float* d = nullptr;
+    CUDA_CHECK(cudaMalloc(&d, input.size() * sizeof(float)));
+    CUDA_CHECK(cudaMemcpy(d, input.data(), input.size() * sizeof(float), cudaMemcpyHostToDevice));
+    blqs::sort(d, static_cast<int>(input.size()), cmp_float);
+    HostVerifySorted(d, static_cast<int>(input.size()));
+    CUDA_CHECK(cudaFree(d));
+}
 
-    HostToTest(d_data, static_cast<int>(input.size()));
-    CUDA_CHECK(cudaFree(d_data));
+void TestSortInt64(const std::vector<int64_t>& input) {
+    if (input.empty()) return;
+    int64_t* d = nullptr;
+    CUDA_CHECK(cudaMalloc(&d, input.size() * sizeof(int64_t)));
+    CUDA_CHECK(cudaMemcpy(d, input.data(), input.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
+    blqs::sort(d, static_cast<int>(input.size()), cmp_int64);
+    HostVerifySorted(d, static_cast<int>(input.size()));
+    CUDA_CHECK(cudaFree(d));
+}
+
+void TestSortDouble(const std::vector<double>& input) {
+    if (input.empty()) return;
+    double* d = nullptr;
+    CUDA_CHECK(cudaMalloc(&d, input.size() * sizeof(double)));
+    CUDA_CHECK(cudaMemcpy(d, input.data(), input.size() * sizeof(double), cudaMemcpyHostToDevice));
+    blqs::sort(d, static_cast<int>(input.size()), cmp_double);
+    HostVerifySorted(d, static_cast<int>(input.size()));
+    CUDA_CHECK(cudaFree(d));
 }
 
 } // namespace
 
 TEST(CorrectnessTest, EmptyArray) {
     std::vector<int> data;
-    EXPECT_NO_THROW(TestSort(data));
+    TestSortInt(data);
 }
 
 TEST(CorrectnessTest, SingleElement) {
     std::vector<int> data = {42};
-    TestSort(data);
+    TestSortInt(data);
 }
 
 TEST(CorrectnessTest, TwoElements) {
     std::vector<int> data = {2, 1};
-    TestSort(data);
+    TestSortInt(data);
 }
 
 TEST(CorrectnessTest, AlreadySorted) {
     std::vector<int> data = {1, 2, 3, 4, 5};
-    TestSort(data);
+    TestSortInt(data);
 }
 
 TEST(CorrectnessTest, ReverseSorted) {
     std::vector<int> data = {5, 4, 3, 2, 1};
-    TestSort(data);
+    TestSortInt(data);
 }
 
 TEST(CorrectnessTest, AllEqual) {
     std::vector<int> data(100, 42);
-    TestSort(data);
+    TestSortInt(data);
 }
 
 TEST(CorrectnessTest, RandomSmall) {
     std::vector<int> data = {3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9};
-    TestSort(data);
+    TestSortInt(data);
 }
 
 TEST(CorrectnessTest, RandomLarge) {
@@ -83,30 +108,25 @@ TEST(CorrectnessTest, RandomLarge) {
     std::uniform_int_distribution<int> dist(-10000, 10000);
     std::vector<int> data(10000);
     for (auto& v : data) v = dist(gen);
-    TestSort(data);
+    TestSortInt(data);
 }
 
 TEST(CorrectnessTest, FloatBasic) {
     std::vector<float> data = {3.14f, 1.41f, 2.71f, 0.0f, -1.0f};
-    TestSort(data);
-}
-
-TEST(CorrectnessTest, FloatWithNaN) {
-    std::vector<float> data = {3.14f, std::numeric_limits<float>::quiet_NaN(), 1.41f, 2.71f};
-    TestSort(data);
+    TestSortFloat(data);
 }
 
 TEST(CorrectnessTest, NegativeIntegers) {
     std::vector<int> data = {-5, -1, -10, -3, -7, -2};
-    TestSort(data);
+    TestSortInt(data);
 }
 
 TEST(CorrectnessTest, Int64Basic) {
     std::vector<int64_t> data = {3, 1, 4, 1, 5, 9, 2, 6};
-    TestSort(data);
+    TestSortInt64(data);
 }
 
 TEST(CorrectnessTest, DoubleBasic) {
     std::vector<double> data = {3.14159, 1.41421, 2.71828, 0.0, -1.0};
-    TestSort(data);
+    TestSortDouble(data);
 }

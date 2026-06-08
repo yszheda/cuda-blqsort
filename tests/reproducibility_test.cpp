@@ -7,40 +7,34 @@
 #include <vector>
 #include <random>
 
+int cmp_int(const int& a, const int& b) { return a < b; }
+
+int cmp_float(const float& a, const float& b) { return a < b; }
+
 namespace {
 
-template <typename T>
-struct AscendingComparator {
-    __host__ __device__ bool operator()(const T& a, const T& b) const {
-        return a < b;
-    }
-};
-
-// Run sort multiple times and verify identical output
-template <typename T>
-void TestReproducibility(const std::vector<T>& input, int runs = 3) {
+void TestReproducibility(const std::vector<int>& input, int runs = 3) {
     int n = static_cast<int>(input.size());
-    std::vector<T> first_run(n);
+    if (n == 0) return;
+    std::vector<int> first_run;
 
     for (int r = 0; r < runs; r++) {
-        T* d_data = nullptr;
-        CUDA_CHECK(cudaMalloc(&d_data, n * sizeof(T)));
-        CUDA_CHECK(cudaMemcpy(d_data, input.data(), n * sizeof(T), cudaMemcpyHostToDevice));
-
-        blqs::sort(d_data, n, AscendingComparator<T>());
+        int* d = nullptr;
+        CUDA_CHECK(cudaMalloc(&d, n * sizeof(int)));
+        CUDA_CHECK(cudaMemcpy(d, input.data(), n * sizeof(int), cudaMemcpyHostToDevice));
+        blqs::sort(d, n, cmp_int);
         CUDA_CHECK(cudaDeviceSynchronize());
 
-        std::vector<T> h_data(n);
-        CUDA_CHECK(cudaMemcpy(h_data.data(), d_data, n * sizeof(T), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaFree(d_data));
+        std::vector<int> h(n);
+        CUDA_CHECK(cudaMemcpy(h.data(), d, n * sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaFree(d));
 
         if (r == 0) {
-            first_run = h_data;
+            first_run = h;
         } else {
             for (int i = 0; i < n; i++) {
-                EXPECT_EQ(first_run[i], h_data[i])
-                    << "Non-deterministic result at index " << i
-                    << " (run 0 vs run " << r << ")";
+                EXPECT_EQ(first_run[i], h[i])
+                    << "Non-deterministic at index " << i << " (run 0 vs run " << r << ")";
             }
         }
     }
@@ -61,7 +55,23 @@ TEST(ReproducibilityTest, DeterministicFloat) {
     std::uniform_real_distribution<float> dist(-100.0f, 100.0f);
     std::vector<float> data(500);
     for (auto& v : data) v = dist(gen);
-    TestReproducibility(data);
+
+    int n = 500;
+    std::vector<float> first_run;
+    for (int r = 0; r < 3; r++) {
+        float* d = nullptr;
+        CUDA_CHECK(cudaMalloc(&d, n * sizeof(float)));
+        CUDA_CHECK(cudaMemcpy(d, data.data(), n * sizeof(float), cudaMemcpyHostToDevice));
+        blqs::sort(d, n, cmp_float);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        std::vector<float> h(n);
+        CUDA_CHECK(cudaMemcpy(h.data(), d, n * sizeof(float), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaFree(d));
+        if (r == 0) first_run = h;
+        else {
+            for (int i = 0; i < n; i++) EXPECT_EQ(first_run[i], h[i]);
+        }
+    }
 }
 
 TEST(ReproducibilityTest, DeterministicLarge) {

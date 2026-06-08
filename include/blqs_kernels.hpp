@@ -8,6 +8,10 @@
 #include "blqs_config.hpp"
 #include "blqs_errors.hpp"
 
+// All kernel definitions are gated behind __CUDACC__ so .cpp files can
+// include this header without nvcc-specific syntax errors.
+#ifdef __CUDACC__
+
 namespace blqs {
 namespace detail {
 
@@ -328,3 +332,7 @@ void radix_sort_driver(K* d_keys, V* d_values, int n) {
 
 } // namespace detail
 } // namespace blqs
+
+#endif // __CUDACC__
+
+#endif // __CUDACC__
