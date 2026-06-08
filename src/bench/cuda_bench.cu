@@ -9,8 +9,8 @@
 
 using namespace blqs;
 
-template <typename T>
-__device__ int asc_cmp(const T& a, const T& b) { return a < b; }
+int cmp_int(const int& a, const int& b) { return a < b; }
+int cmp_float(const float& a, const float& b) { return a < b; }
 
 template <typename T>
 void run_benchmark(const std::string& name, int n, int iterations = 5) {
@@ -19,13 +19,13 @@ void run_benchmark(const std::string& name, int n, int iterations = 5) {
     CUDA_CHECK(cudaMalloc(&d_data, n * sizeof(T)));
     CUDA_CHECK(cudaMemcpy(d_data, h_data.data(), n * sizeof(T), cudaMemcpyHostToDevice));
 
-    using Cmp = int (*)(const T&, const T&);
     double total_ms = 0;
     for (int i = 0; i < iterations; i++) {
         CUDA_CHECK(cudaMemcpy(d_data, h_data.data(), n * sizeof(T), cudaMemcpyHostToDevice));
         bench::CudaTimer timer;
         timer.start();
-        blqs::sort(d_data, n, static_cast<Cmp>(asc_cmp<T>));
+        // Comparator is accepted but ignored (kernels use operator<)
+        blqs::sort(d_data, n, static_cast<int (*)(const T&, const T&)>(nullptr));
         timer.stop();
         CUDA_CHECK(cudaDeviceSynchronize());
         total_ms += timer.elapsed_ms();

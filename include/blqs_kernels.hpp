@@ -1,5 +1,5 @@
 // All CUDA kernel template definitions for cuda-blqsort
-// Defined in headers for on-demand template instantiation with arbitrary comparators
+// Kernels use operator< directly (no custom comparator parameter)
 #pragma once
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
@@ -15,29 +15,11 @@
 namespace blqs {
 namespace detail {
 
-// ── Pivot Selection (Median-of-Three) ──────────────────────────────────────
+// ── Partition Kernel (uses operator<) ──────────────────────────────────────
 
-template <typename T, typename Comparator>
-__device__ int select_pivot(const T* data, int n, Comparator cmp) {
-    int mid = n / 2;
-    int last = n - 1;
-    if (cmp(data[last], data[0])) {
-        if (cmp(data[0], data[mid])) return 0;
-        if (cmp(data[last], data[mid])) return last;
-        return mid;
-    } else {
-        if (cmp(data[last], data[mid])) return last;
-        if (cmp(data[0], data[mid])) return mid;
-        return 0;
-    }
-}
-
-// ── Partition Kernel ───────────────────────────────────────────────────────
-
-template <typename T, typename Comparator>
+template <typename T>
 __global__ void partition_kernel(
-    T* data, int n, int* bucket_counts, int* bucket_offsets,
-    int num_buckets, Comparator cmp) {
+    T* data, int n, int* bucket_counts, int* bucket_offsets, int num_buckets) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n) return;
 
@@ -47,26 +29,29 @@ __global__ void partition_kernel(
 
     if (threadIdx.x == 0) {
         chunk_start = blockIdx.x * blockDim.x;
-        chunk_size = min(blockDim.x, n - chunk_start);
-        int pivot_idx = chunk_start + select_pivot(data + chunk_start, chunk_size, cmp);
-        pivot = data[pivot_idx];
+        int cs = (n - chunk_start < BLOCK_SIZE) ? (n - chunk_start) : BLOCK_SIZE;
+        chunk_size = cs;
+        // Median-of-three pivot
+        int a = chunk_start, b = chunk_start + cs / 2, c = chunk_start + cs - 1;
+        T va = data[a], vb = data[b], vc = data[c];
+        if (vc < va) { if (va < vb) pivot = va; else if (vc < vb) pivot = vc; else pivot = vb; }
+        else { if (vc < vb) pivot = vc; else if (va < vb) pivot = vb; else pivot = va; }
     }
     __syncthreads();
 
     T val = data[tid];
-    int bucket = cmp(val, pivot) ? 0 : 1;
+    int bucket = (val < pivot) ? 0 : 1;
     int pos = atomicAdd(&bucket_counts[blockIdx.x * num_buckets + bucket], 1);
     int offset = (bucket == 0) ? chunk_start
                                : chunk_start + bucket_counts[blockIdx.x * num_buckets + 0];
     data[offset + pos] = val;
 }
 
-// ── KV Partition Kernel ────────────────────────────────────────────────────
+// ── KV Partition Kernel (uses operator< on keys) ───────────────────────────
 
-template <typename K, typename V, typename Comparator>
+template <typename K, typename V>
 __global__ void kv_partition_kernel(
-    K* keys, V* values, int n, int* bucket_counts, int* bucket_offsets,
-    int num_buckets, Comparator cmp) {
+    K* keys, V* values, int n, int* bucket_counts, int* bucket_offsets, int num_buckets) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n) return;
 
@@ -76,15 +61,18 @@ __global__ void kv_partition_kernel(
 
     if (threadIdx.x == 0) {
         chunk_start = blockIdx.x * blockDim.x;
-        chunk_size = min(blockDim.x, n - chunk_start);
-        int pivot_idx = chunk_start + select_pivot(keys + chunk_start, chunk_size, cmp);
-        pivot = keys[pivot_idx];
+        int cs = (n - chunk_start < BLOCK_SIZE) ? (n - chunk_start) : BLOCK_SIZE;
+        chunk_size = cs;
+        int a = chunk_start, b = chunk_start + cs / 2, c = chunk_start + cs - 1;
+        K va = keys[a], vb = keys[b], vc = keys[c];
+        if (vc < va) { if (va < vb) pivot = va; else if (vc < vb) pivot = vc; else pivot = vb; }
+        else { if (vc < vb) pivot = vc; else if (va < vb) pivot = vb; else pivot = va; }
     }
     __syncthreads();
 
     K key = keys[tid];
     V val = values[tid];
-    int bucket = cmp(key, pivot) ? 0 : 1;
+    int bucket = (key < pivot) ? 0 : 1;
     int pos = atomicAdd(&bucket_counts[blockIdx.x * num_buckets + bucket], 1);
     int offset = (bucket == 0) ? chunk_start
                                : chunk_start + bucket_counts[blockIdx.x * num_buckets + 0];
@@ -94,12 +82,12 @@ __global__ void kv_partition_kernel(
 
 // ── Insertion Sort (Base Case) ─────────────────────────────────────────────
 
-template <typename T, typename Comparator>
-__device__ void insertion_sort(T* data, int n, Comparator cmp) {
+template <typename T>
+__device__ void insertion_sort(T* data, int n) {
     for (int i = 1; i < n; i++) {
         T key = data[i];
         int j = i - 1;
-        while (j >= 0 && cmp(key, data[j])) {
+        while (j >= 0 && key < data[j]) {
             data[j + 1] = data[j];
             j--;
         }
@@ -109,12 +97,12 @@ __device__ void insertion_sort(T* data, int n, Comparator cmp) {
 
 // ── Partition Block (Lomuto) ───────────────────────────────────────────────
 
-template <typename T, typename Comparator>
-__device__ T partition_block(T* data, int low, int high, Comparator cmp) {
+template <typename T>
+__device__ T partition_block(T* data, int low, int high) {
     T pivot = data[high];
     int i = low - 1;
     for (int j = low; j < high; j++) {
-        if (!cmp(pivot, data[j])) {
+        if (!(pivot < data[j])) {
             i++;
             T tmp = data[i]; data[i] = data[j]; data[j] = tmp;
         }
@@ -125,8 +113,8 @@ __device__ T partition_block(T* data, int low, int high, Comparator cmp) {
 
 // ── Shared-Memory Quicksort Kernel ─────────────────────────────────────────
 
-template <typename T, int MaxSize = 1024, typename Comparator>
-__global__ void quicksort_shared(T* data, int n, Comparator cmp) {
+template <typename T, int MaxSize = 1024>
+__global__ void quicksort_shared(T* data, int n) {
     __shared__ T shared_mem[MaxSize];
     int tid = threadIdx.x;
     if (tid < n) shared_mem[tid] = data[blockIdx.x * blockDim.x + tid];
@@ -141,10 +129,10 @@ __global__ void quicksort_shared(T* data, int n, Comparator cmp) {
         int high = stack_high[top--];
         if (low >= high) continue;
         if (high - low + 1 <= BASE_CASE_THRESHOLD) {
-            insertion_sort(shared_mem + low, high - low + 1, cmp);
+            insertion_sort(shared_mem + low, high - low + 1);
             continue;
         }
-        int pi = partition_block(shared_mem, low, high, cmp);
+        int pi = partition_block(shared_mem, low, high);
         stack_low[++top] = low; stack_high[top] = pi - 1;
         stack_low[++top] = pi + 1; stack_high[top] = high;
     }
@@ -155,11 +143,11 @@ __global__ void quicksort_shared(T* data, int n, Comparator cmp) {
 
 // ── KV Block Sort Kernel ───────────────────────────────────────────────────
 
-template <typename K, typename V, typename Comparator>
-__global__ void kv_block_sort_kernel(K* keys, V* values, int n, Comparator cmp) {
+template <typename K, typename V>
+__global__ void kv_block_sort_kernel(K* keys, V* values, int n) {
     int tid = threadIdx.x;
     int block_offset = blockIdx.x * blockDim.x;
-    int chunk_size = min(blockDim.x, n - block_offset);
+    int chunk_size = (n - block_offset < BLOCK_SIZE) ? (n - block_offset) : BLOCK_SIZE;
 
     __shared__ K shared_keys[1024];
     __shared__ V shared_values[1024];
@@ -178,7 +166,7 @@ __global__ void kv_block_sort_kernel(K* keys, V* values, int n, Comparator cmp) 
         K pivot = shared_keys[high];
         int i = low - 1;
         for (int j = low; j < high; j++) {
-            if (!cmp(pivot, shared_keys[j])) {
+            if (!(pivot < shared_keys[j])) {
                 i++;
                 K tk = shared_keys[i]; shared_keys[i] = shared_keys[j]; shared_keys[j] = tk;
                 V tv = shared_values[i]; shared_values[i] = shared_values[j]; shared_values[j] = tv;
@@ -200,20 +188,20 @@ __global__ void kv_block_sort_kernel(K* keys, V* values, int n, Comparator cmp) 
 
 // ── Warp-Level Partition Helper ────────────────────────────────────────────
 
-template <typename T, typename Comparator>
-__device__ int warp_partition(T* shared_data, int low, int high, Comparator cmp) {
+template <typename T>
+__device__ int warp_partition(T* shared_data, int low, int high) {
     int tid = threadIdx.x;
     T pivot = shared_data[high];
-    unsigned int mask = __ballot_sync(0xFFFFFFFF, tid < high && !cmp(pivot, shared_data[tid]));
+    unsigned int mask = __ballot_sync(0xFFFFFFFF, tid < high && !(pivot < shared_data[tid]));
     return __popc(mask & ((1u << tid) - 1));
 }
 
 // ── Stable Merge Kernel ────────────────────────────────────────────────────
 
-template <typename T, typename Comparator>
+template <typename T>
 __global__ void stable_merge_kernel(
     const T* input, T* output, const int* indices, int* output_indices,
-    int n, int left_size, Comparator cmp) {
+    int n, int left_size) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n) return;
     int target = tid, l = 0, r = left_size;
@@ -224,7 +212,7 @@ __global__ void stable_merge_kernel(
         } else if (r >= n) {
             if (i == target) { output[i] = input[l]; output_indices[i] = indices[l]; }
             l++;
-        } else if (!cmp(input[left_size + r], input[l])) {
+        } else if (!(input[left_size + r] < input[l])) {
             if (i == target) { output[i] = input[l]; output_indices[i] = indices[l]; }
             l++;
         } else {
