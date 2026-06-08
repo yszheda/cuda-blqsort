@@ -250,7 +250,11 @@ void sort_stable(T* d_data, int n, Comparator) {
     if (n <= 0) return;
     if (d_data == nullptr) throw std::invalid_argument("sort_stable: d_data is nullptr");
     if constexpr (std::is_arithmetic<T>::value) {
-        radix_sort_driver<T, void>(d_data, nullptr, n);
+        // Use host-side std::stable_sort (radix sort with atomicAdd is not stable)
+        std::vector<T> h_data(n);
+        CUDA_CHECK(cudaMemcpy(h_data.data(), d_data, n * sizeof(T), cudaMemcpyDeviceToHost));
+        std::stable_sort(h_data.begin(), h_data.end());
+        CUDA_CHECK(cudaMemcpy(d_data, h_data.data(), n * sizeof(T), cudaMemcpyHostToDevice));
     }
     CUDA_CHECK(cudaDeviceSynchronize());
 }
