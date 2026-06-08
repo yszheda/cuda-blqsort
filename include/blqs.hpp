@@ -18,26 +18,35 @@ void sort_by_key(K* d_keys, V* d_values, int n);
 template <typename K, typename V>
 void sort_by_key_stable(K* d_keys, V* d_values, int n);
 
-} // namespace blqs
-
-// For .cpp files: extern template declarations so the compiler knows these exist.
+// Extern template declarations for .cpp files.
 // The actual definitions come from blqs_api.cu (compiled by nvcc).
-// These only apply when NOT using nvcc.
+// These suppress implicit instantiation in .cpp compilation units.
 #ifndef __CUDACC__
-extern template void blqs::sort<int,       int (*)(const int&,    const int&)>(int*, int, int (*)(const int&, const int&));
-extern template void blqs::sort<float,     int (*)(const float&,  const float&)>(float*, int, int (*)(const float&, const float&));
-extern template void blqs::sort<int64_t,   int (*)(const int64_t&,const int64_t&)>(int64_t*, int, int (*)(const int64_t&, const int64_t&));
-extern template void blqs::sort<double,    int (*)(const double&, const double&)>(double*, int, int (*)(const double&, const double&));
-extern template void blqs::sort_stable<int,       int (*)(const int&,    const int&)>(int*, int, int (*)(const int&, const int&));
-extern template void blqs::sort_stable<float,     int (*)(const float&,  const float&)>(float*, int, int (*)(const float&, const float&));
-extern template void blqs::sort_stable<int64_t,   int (*)(const int64_t&,const int64_t&)>(int64_t*, int, int (*)(const int64_t&, const int64_t&));
-extern template void blqs::sort_stable<double,    int (*)(const double&, const double&)>(double*, int, int (*)(const double&, const double&));
-extern template void blqs::sort_by_key<int, int>(int*, int*, int);
-extern template void blqs::sort_by_key<float, int>(float*, int*, int);
-extern template void blqs::sort_by_key<int64_t, int64_t>(int64_t*, int64_t*, int);
-extern template void blqs::sort_by_key<double, double>(double*, double*, int);
-extern template void blqs::sort_by_key_stable<int, int>(int*, int*, int);
-extern template void blqs::sort_by_key_stable<float, int>(float*, int*, int);
-extern template void blqs::sort_by_key_stable<int64_t, int64_t>(int64_t*, int64_t*, int);
-extern template void blqs::sort_by_key_stable<double, double>(double*, double*, int);
+
+// sort
+extern template void sort<int,       int (*)(const int&,    const int&)>(int*, int, int (*)(const int&, const int&));
+extern template void sort<float,     int (*)(const float&,  const float&)>(float*, int, int (*)(const float&, const float&));
+extern template void sort<int64_t,   int (*)(const int64_t&,const int64_t&)>(int64_t*, int, int (*)(const int64_t&, const int64_t&));
+extern template void sort<double,    int (*)(const double&, const double&)>(double*, int, int (*)(const double&, const double&));
+
+// sort_stable
+extern template void sort_stable<int,       int (*)(const int&,    const int&)>(int*, int, int (*)(const int&, const int&));
+extern template void sort_stable<float,     int (*)(const float&,  const float&)>(float*, int, int (*)(const float&, const float&));
+extern template void sort_stable<int64_t,   int (*)(const int64_t&,const int64_t&)>(int64_t*, int, int (*)(const int64_t&, const int64_t&));
+extern template void sort_stable<double,    int (*)(const double&, const double&)>(double*, int, int (*)(const double&, const double&));
+
+// sort_by_key
+extern template void sort_by_key<int, int>(int*, int*, int);
+extern template void sort_by_key<float, int>(float*, int*, int);
+extern template void sort_by_key<int64_t, int64_t>(int64_t*, int64_t*, int);
+extern template void sort_by_key<double, double>(double*, double*, int);
+
+// sort_by_key_stable
+extern template void sort_by_key_stable<int, int>(int*, int*, int);
+extern template void sort_by_key_stable<float, int>(float*, int*, int);
+extern template void sort_by_key_stable<int64_t, int64_t>(int64_t*, int64_t*, int);
+extern template void sort_by_key_stable<double, double>(double*, double*, int);
+
 #endif
+
+} // namespace blqs

@@ -10,10 +10,10 @@
 #include <random>
 
 // Plain function pointer comparators (matching explicit instantiations)
-int cmp_int(const int& a, const int& b) { return a < b; }
-int cmp_float(const float& a, const float& b) { return a < b; }
-int cmp_int64(const int64_t& a, const int64_t& b) { return a < b; }
-int cmp_double(const double& a, const double& b) { return a < b; }
+inline int cmp_int(const int& a, const int& b) { return a < b; }
+inline int cmp_float(const float& a, const float& b) { return a < b; }
+inline int cmp_int64(const int64_t& a, const int64_t& b) { return a < b; }
+inline int cmp_double(const double& a, const double& b) { return a < b; }
 
 namespace {
 

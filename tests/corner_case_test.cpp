@@ -9,7 +9,7 @@
 #include <random>
 #include <numeric>
 
-int cmp_int(const int& a, const int& b) { return a < b; }
+inline int cmp_int(const int& a, const int& b) { return a < b; }
 
 namespace {
 
