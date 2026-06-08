@@ -23,19 +23,20 @@ __global__ void count_less_kernel(const T* data, int n, T pivot, int* d_less_cou
     if (data[tid] < pivot) atomicAdd(d_less_count, 1);
 }
 
-// Pass 2: Scatter elements — less-than go to [0..less_count), >= go to [less_count..n)
+// Pass 2: Scatter elements using separate output buffer to avoid read/write race
 template <typename T>
 __global__ void partition_scatter_kernel(
-    T* data, int n, T pivot, int less_count, int* d_less_written, int* d_ge_written) {
+    const T* input, T* output, int n, T pivot, int less_count,
+    int* d_less_written, int* d_ge_written) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n) return;
-    T val = data[tid];
+    T val = input[tid];
     if (val < pivot) {
         int pos = atomicAdd(d_less_written, 1);
-        data[pos] = val;
+        output[pos] = val;
     } else {
         int pos = atomicAdd(d_ge_written, 1);
-        data[less_count + pos] = val;
+        output[less_count + pos] = val;
     }
 }
 
@@ -50,20 +51,21 @@ __global__ void kv_count_less_kernel(const K* keys, int n, K pivot, int* d_less_
 
 template <typename K, typename V>
 __global__ void kv_partition_scatter_kernel(
-    K* keys, V* values, int n, K pivot, int less_count,
+    const K* in_keys, const V* in_values,
+    K* out_keys, V* out_values, int n, K pivot, int less_count,
     int* d_less_written, int* d_ge_written) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n) return;
-    K key = keys[tid];
-    V val = values[tid];
+    K key = in_keys[tid];
+    V val = in_values[tid];
     if (key < pivot) {
         int pos = atomicAdd(d_less_written, 1);
-        keys[pos] = key;
-        values[pos] = val;
+        out_keys[pos] = key;
+        out_values[pos] = val;
     } else {
         int pos = atomicAdd(d_ge_written, 1);
-        keys[less_count + pos] = key;
-        values[less_count + pos] = val;
+        out_keys[less_count + pos] = key;
+        out_values[less_count + pos] = val;
     }
 }
 

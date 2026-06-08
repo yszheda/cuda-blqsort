@@ -1,4 +1,4 @@
-// API implementations — two-pass partition with single global pivot
+// API implementations — two-pass partition with single global pivot, double buffering
 #include "blqs.hpp"
 #include "blqs_errors.hpp"
 #include "blqs_config.hpp"
@@ -11,10 +11,10 @@ using namespace blqs::detail;
 
 namespace blqs {
 
-// ── sort driver: two-pass global partition ────────────────────────────────
+// ── sort driver: two-pass global partition with temp buffer ───────────────
 
 template <typename T>
-void do_sort(T* d_data, int n) {
+void do_sort_impl(T* d_data, T* d_buf, int n) {
     if (n <= 1) return;
 
     // Small arrays: single-block shared-memory quicksort
@@ -26,13 +26,12 @@ void do_sort(T* d_data, int n) {
         return;
     }
 
-    // Read pivot candidates from device
+    // Read pivot candidates
     std::vector<T> h_samples(3);
     CUDA_CHECK(cudaMemcpy(&h_samples[0], d_data, sizeof(T), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(&h_samples[1], d_data + n / 2, sizeof(T), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(&h_samples[2], d_data + n - 1, sizeof(T), cudaMemcpyDeviceToHost));
 
-    // Median-of-three pivot
     T pivot;
     if (h_samples[2] < h_samples[0]) {
         if (h_samples[0] < h_samples[1]) pivot = h_samples[0];
@@ -57,9 +56,8 @@ void do_sort(T* d_data, int n) {
     CUDA_CHECK(cudaMemcpy(&h_less_count, d_less_count, sizeof(int), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaFree(d_less_count));
 
-    // Handle degenerate cases (all elements on one side of pivot)
+    // Handle degenerate: try alternate pivot, fallback to radix
     if (h_less_count == 0 || h_less_count == n) {
-        // Try again with a different pivot: use the element at index n/4
         std::vector<T> h_alt(1);
         CUDA_CHECK(cudaMemcpy(&h_alt[0], d_data + n / 4, sizeof(T), cudaMemcpyDeviceToHost));
         T pivot2 = h_alt[0];
@@ -73,50 +71,57 @@ void do_sort(T* d_data, int n) {
         CUDA_CHECK(cudaFree(d_lc2));
 
         if (h_less_count > 0 && h_less_count < n) {
-            // Second pivot worked, proceed with scatter
             int* d_lw = nullptr, *d_gw = nullptr;
             CUDA_CHECK(cudaMalloc(&d_lw, sizeof(int)));
             CUDA_CHECK(cudaMalloc(&d_gw, sizeof(int)));
             CUDA_CHECK(cudaMemset(d_lw, 0, sizeof(int)));
             CUDA_CHECK(cudaMemset(d_gw, 0, sizeof(int)));
             partition_scatter_kernel<T><<<blocks, threads>>>(
-                d_data, n, pivot2, h_less_count, d_lw, d_gw);
+                d_data, d_buf, n, pivot2, h_less_count, d_lw, d_gw);
             CUDA_CHECK(cudaDeviceSynchronize());
-            CUDA_CHECK(cudaFree(d_lw));
-            CUDA_CHECK(cudaFree(d_gw));
-            do_sort(d_data, h_less_count);
-            do_sort(d_data + h_less_count, n - h_less_count);
+            // Copy result back to d_data
+            CUDA_CHECK(cudaMemcpy(d_data, d_buf, n * sizeof(T), cudaMemcpyDeviceToDevice));
+            CUDA_CHECK(cudaFree(d_lw)); CUDA_CHECK(cudaFree(d_gw));
+            do_sort_impl(d_data, d_buf, h_less_count);
+            do_sort_impl(d_data + h_less_count, d_buf + h_less_count, n - h_less_count);
             return;
         }
-
-        // Still degenerate: use radix sort as fallback (stable, always works)
         radix_sort_driver<T, void>(d_data, nullptr, n);
         return;
     }
 
-    // Pass 2: scatter elements
-    int* d_less_written = nullptr;
-    int* d_ge_written = nullptr;
-    CUDA_CHECK(cudaMalloc(&d_less_written, sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&d_ge_written, sizeof(int)));
-    CUDA_CHECK(cudaMemset(d_less_written, 0, sizeof(int)));
-    CUDA_CHECK(cudaMemset(d_ge_written, 0, sizeof(int)));
+    // Pass 2: scatter to temp buffer (avoid in-place read/write race)
+    int* d_lw = nullptr, *d_gw = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_lw, sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_gw, sizeof(int)));
+    CUDA_CHECK(cudaMemset(d_lw, 0, sizeof(int)));
+    CUDA_CHECK(cudaMemset(d_gw, 0, sizeof(int)));
 
     partition_scatter_kernel<T><<<blocks, threads>>>(
-        d_data, n, pivot, h_less_count, d_less_written, d_ge_written);
+        d_data, d_buf, n, pivot, h_less_count, d_lw, d_gw);
     CUDA_CHECK(cudaDeviceSynchronize());
-    CUDA_CHECK(cudaFree(d_less_written));
-    CUDA_CHECK(cudaFree(d_ge_written));
+    // Copy partitioned result back
+    CUDA_CHECK(cudaMemcpy(d_data, d_buf, n * sizeof(T), cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaFree(d_lw)); CUDA_CHECK(cudaFree(d_gw));
 
     // Recursively sort both halves
-    do_sort(d_data, h_less_count);
-    do_sort(d_data + h_less_count, n - h_less_count);
+    do_sort_impl(d_data, d_buf, h_less_count);
+    do_sort_impl(d_data + h_less_count, d_buf + h_less_count, n - h_less_count);
+}
+
+template <typename T>
+void do_sort(T* d_data, int n) {
+    if (n <= 1) return;
+    T* d_buf = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_buf, n * sizeof(T)));
+    do_sort_impl(d_data, d_buf, n);
+    CUDA_CHECK(cudaFree(d_buf));
 }
 
 // ── KV sort driver ────────────────────────────────────────────────────────
 
 template <typename K, typename V>
-void do_sort_by_key(K* d_keys, V* d_values, int n) {
+void do_sort_by_key_impl(K* d_keys, V* d_values, K* d_kbuf, V* d_vbuf, int n) {
     if (n <= 1) return;
 
     if (n <= BLOCK_SIZE) {
@@ -155,11 +160,9 @@ void do_sort_by_key(K* d_keys, V* d_values, int n) {
     CUDA_CHECK(cudaFree(d_less_count));
 
     if (h_less_count == 0 || h_less_count == n) {
-        // Try alternate pivot
         std::vector<K> h_alt(1);
         CUDA_CHECK(cudaMemcpy(&h_alt[0], d_keys + n / 4, sizeof(K), cudaMemcpyDeviceToHost));
         K pivot2 = h_alt[0];
-
         int* d_lc2 = nullptr;
         CUDA_CHECK(cudaMalloc(&d_lc2, sizeof(int)));
         CUDA_CHECK(cudaMemset(d_lc2, 0, sizeof(int)));
@@ -175,34 +178,46 @@ void do_sort_by_key(K* d_keys, V* d_values, int n) {
             CUDA_CHECK(cudaMemset(d_lw, 0, sizeof(int)));
             CUDA_CHECK(cudaMemset(d_gw, 0, sizeof(int)));
             kv_partition_scatter_kernel<K, V><<<blocks, threads>>>(
-                d_keys, d_values, n, pivot2, h_less_count, d_lw, d_gw);
+                d_keys, d_values, d_kbuf, d_vbuf, n, pivot2, h_less_count, d_lw, d_gw);
             CUDA_CHECK(cudaDeviceSynchronize());
-            CUDA_CHECK(cudaFree(d_lw));
-            CUDA_CHECK(cudaFree(d_gw));
-            do_sort_by_key(d_keys, d_values, h_less_count);
-            do_sort_by_key(d_keys + h_less_count, d_values + h_less_count, n - h_less_count);
+            CUDA_CHECK(cudaMemcpy(d_keys, d_kbuf, n * sizeof(K), cudaMemcpyDeviceToDevice));
+            CUDA_CHECK(cudaMemcpy(d_values, d_vbuf, n * sizeof(V), cudaMemcpyDeviceToDevice));
+            CUDA_CHECK(cudaFree(d_lw)); CUDA_CHECK(cudaFree(d_gw));
+            do_sort_by_key_impl(d_keys, d_values, d_kbuf, d_vbuf, h_less_count);
+            do_sort_by_key_impl(d_keys + h_less_count, d_values + h_less_count, d_kbuf + h_less_count, d_vbuf + h_less_count, n - h_less_count);
             return;
         }
-
         radix_sort_driver<K, V>(d_keys, d_values, n);
         return;
     }
 
-    int* d_less_written = nullptr;
-    int* d_ge_written = nullptr;
-    CUDA_CHECK(cudaMalloc(&d_less_written, sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&d_ge_written, sizeof(int)));
-    CUDA_CHECK(cudaMemset(d_less_written, 0, sizeof(int)));
-    CUDA_CHECK(cudaMemset(d_ge_written, 0, sizeof(int)));
+    int* d_lw = nullptr, *d_gw = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_lw, sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_gw, sizeof(int)));
+    CUDA_CHECK(cudaMemset(d_lw, 0, sizeof(int)));
+    CUDA_CHECK(cudaMemset(d_gw, 0, sizeof(int)));
 
     kv_partition_scatter_kernel<K, V><<<blocks, threads>>>(
-        d_keys, d_values, n, pivot, h_less_count, d_less_written, d_ge_written);
+        d_keys, d_values, d_kbuf, d_vbuf, n, pivot, h_less_count, d_lw, d_gw);
     CUDA_CHECK(cudaDeviceSynchronize());
-    CUDA_CHECK(cudaFree(d_less_written));
-    CUDA_CHECK(cudaFree(d_ge_written));
+    CUDA_CHECK(cudaMemcpy(d_keys, d_kbuf, n * sizeof(K), cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpy(d_values, d_vbuf, n * sizeof(V), cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaFree(d_lw)); CUDA_CHECK(cudaFree(d_gw));
 
-    do_sort_by_key(d_keys, d_values, h_less_count);
-    do_sort_by_key(d_keys + h_less_count, d_values + h_less_count, n - h_less_count);
+    do_sort_by_key_impl(d_keys, d_values, d_kbuf, d_vbuf, h_less_count);
+    do_sort_by_key_impl(d_keys + h_less_count, d_values + h_less_count, d_kbuf + h_less_count, d_vbuf + h_less_count, n - h_less_count);
+}
+
+template <typename K, typename V>
+void do_sort_by_key(K* d_keys, V* d_values, int n) {
+    if (n <= 1) return;
+    K* d_kbuf = nullptr;
+    V* d_vbuf = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_kbuf, n * sizeof(K)));
+    CUDA_CHECK(cudaMalloc(&d_vbuf, n * sizeof(V)));
+    do_sort_by_key_impl(d_keys, d_values, d_kbuf, d_vbuf, n);
+    CUDA_CHECK(cudaFree(d_kbuf));
+    CUDA_CHECK(cudaFree(d_vbuf));
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
