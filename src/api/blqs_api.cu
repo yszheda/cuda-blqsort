@@ -5,6 +5,7 @@
 #include "blqs_kernels.hpp"
 #include <type_traits>
 #include <stdexcept>
+#include <algorithm>
 #include <vector>
 
 using namespace blqs::detail;
@@ -86,7 +87,11 @@ void do_sort_impl(T* d_data, T* d_buf, int n) {
             do_sort_impl(d_data + h_less_count, d_buf + h_less_count, n - h_less_count);
             return;
         }
-        radix_sort_driver<T, void>(d_data, nullptr, n);
+        // Still degenerate: copy to host, sort, copy back
+        std::vector<T> h_data(n);
+        CUDA_CHECK(cudaMemcpy(h_data.data(), d_data, n * sizeof(T), cudaMemcpyDeviceToHost));
+        std::sort(h_data.begin(), h_data.end());
+        CUDA_CHECK(cudaMemcpy(d_data, h_data.data(), n * sizeof(T), cudaMemcpyHostToDevice));
         return;
     }
 
@@ -187,7 +192,17 @@ void do_sort_by_key_impl(K* d_keys, V* d_values, K* d_kbuf, V* d_vbuf, int n) {
             do_sort_by_key_impl(d_keys + h_less_count, d_values + h_less_count, d_kbuf + h_less_count, d_vbuf + h_less_count, n - h_less_count);
             return;
         }
-        radix_sort_driver<K, V>(d_keys, d_values, n);
+        // Still degenerate: copy to host, sort, copy back
+        std::vector<K> h_k(n);
+        std::vector<V> h_v(n);
+        CUDA_CHECK(cudaMemcpy(h_k.data(), d_keys, n * sizeof(K), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(h_v.data(), d_values, n * sizeof(V), cudaMemcpyDeviceToHost));
+        std::vector<std::pair<K, V>> pairs(n);
+        for (int i = 0; i < n; i++) pairs[i] = {h_k[i], h_v[i]};
+        std::sort(pairs.begin(), pairs.end());
+        for (int i = 0; i < n; i++) { h_k[i] = pairs[i].first; h_v[i] = pairs[i].second; }
+        CUDA_CHECK(cudaMemcpy(d_keys, h_k.data(), n * sizeof(K), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_values, h_v.data(), n * sizeof(V), cudaMemcpyHostToDevice));
         return;
     }
 
