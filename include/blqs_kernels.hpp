@@ -180,12 +180,37 @@ __global__ void radix_sort_pass_kernel(
     int* s_cnt = s_mem;
     int* s_off = s_mem + RADIX_BINS;
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int lane = threadIdx.x & 31;
+    int wid = threadIdx.x >> 5;
+    int num_warps = (blockDim.x + 31) >> 5;
 
-    if (threadIdx.x < RADIX_BINS) s_cnt[threadIdx.x] = 0;
-    __syncthreads();
-    if (tid < n) atomicAdd(&s_cnt[get_radix_digit(in_k[tid], pass)], 1);
+    // Phase 1: Compute digit per thread
+    int digit = (tid < n) ? get_radix_digit(in_k[tid], pass) : 0;
+
+    // Phase 2: Per-warp histogram using ballot
+    // For each digit value, count how many threads in each warp have that digit
+    // Store in shared memory: warp_hist[wid * RADIX_BINS + digit]
+    int* warp_hist = s_mem + RADIX_BINS * 2;
+
+    for (int d = 0; d < RADIX_BINS; d++) {
+        unsigned int mask = __ballot_sync(0xFFFFFFFF, tid < n && digit == d);
+        warp_hist[wid * RADIX_BINS + d] = __popc(mask);
+    }
     __syncthreads();
 
+    // Phase 3: Prefix sum across warps to get global block offsets per digit
+    if (threadIdx.x < RADIX_BINS) {
+        int sum = 0;
+        for (int w = 0; w < num_warps; w++) {
+            int old = sum;
+            sum += warp_hist[w * RADIX_BINS + threadIdx.x];
+            warp_hist[w * RADIX_BINS + threadIdx.x] = old;
+        }
+        s_cnt[threadIdx.x] = sum;
+    }
+    __syncthreads();
+
+    // Phase 4: Prefix sum of s_cnt to get starting offsets per digit
     if (threadIdx.x < RADIX_BINS) {
         int s = 0;
         for (int i = 0; i < threadIdx.x; i++) s += s_cnt[i];
@@ -193,11 +218,13 @@ __global__ void radix_sort_pass_kernel(
     }
     __syncthreads();
 
+    // Phase 5: Scatter with stable position
     if (tid < n) {
-        int d = get_radix_digit(in_k[tid], pass);
-        int p = atomicAdd(&s_off[d], 1);
-        out_k[p] = in_k[tid];
-        if constexpr (!std::is_same<V, void>::value) out_v[p] = in_v[tid];
+        int d = digit;
+        int pos = s_off[d] + warp_hist[wid * RADIX_BINS + d] +
+                  __popc(__ballot_sync(0xFFFFFFFF, digit == d) & ((1u << lane) - 1));
+        out_k[pos] = in_k[tid];
+        if constexpr (!std::is_same<V, void>::value) out_v[pos] = in_v[tid];
     }
 }
 
@@ -217,6 +244,8 @@ void radix_sort_driver(K* d_keys, V* d_values, int n) {
     }
 
     int threads = 256, blocks = (n + threads - 1) / threads;
+    int num_warps = (threads + 31) >> 5;
+    size_t smem = (RADIX_BINS * 2 + num_warps * RADIX_BINS) * sizeof(int);
     for (int p = 0; p < passes; p++) {
         int s = p % 2, d = 1 - s;
         size_t smem = RADIX_BINS * 2 * sizeof(int);
