@@ -67,7 +67,7 @@ __device__ T partition_block(T* data, int low, int high, Comparator cmp) {
 // ── Shared-Memory Quicksort (Task 2) ───────────────────────────────────────
 
 template <typename T, int MaxSize = 1024, typename Comparator>
-__device__ void quicksort_shared(T* data, int n, Comparator cmp) {
+__global__ void quicksort_shared(T* data, int n, Comparator cmp) {
     __shared__ T shared_mem[MaxSize];
 
     int tid = threadIdx.x;
@@ -169,10 +169,10 @@ __global__ void kv_block_sort_kernel(
 
 // ── Explicit Instantiations ────────────────────────────────────────────────
 
-template __device__ void quicksort_shared<int, 1024, int (*)(const int&, const int&)>(int*, int, int (*)(const int&, const int&));
-template __device__ void quicksort_shared<float, 1024, int (*)(const float&, const float&)>(float*, int, int (*)(const float&, const float&));
-template __device__ void quicksort_shared<int64_t, 1024, int (*)(const int64_t&, const int64_t&)>(int64_t*, int, int (*)(const int64_t&, const int64_t&));
-template __device__ void quicksort_shared<double, 1024, int (*)(const double&, const double&)>(double*, int, int (*)(const double&, const double&));
+template __global__ void quicksort_shared<int, 1024, int (*)(const int&, const int&)>(int*, int, int (*)(const int&, const int&));
+template __global__ void quicksort_shared<float, 1024, int (*)(const float&, const float&)>(float*, int, int (*)(const float&, const float&));
+template __global__ void quicksort_shared<int64_t, 1024, int (*)(const int64_t&, const int64_t&)>(int64_t*, int, int (*)(const int64_t&, const int64_t&));
+template __global__ void quicksort_shared<double, 1024, int (*)(const double&, const double&)>(double*, int, int (*)(const double&, const double&));
 
 template __global__ void kv_block_sort_kernel<int, int, int (*)(const int&, const int&)>(int*, int*, int, int (*)(const int&, const int&));
 template __global__ void kv_block_sort_kernel<float, int, int (*)(const float&, const float&)>(float*, int*, int, int (*)(const float&, const float&));

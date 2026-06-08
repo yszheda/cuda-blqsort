@@ -12,7 +12,7 @@ __global__ void partition_kernel(
 
 // Kernel declarations (defined in block_sort.cu)
 template <typename T, int MaxSize, typename Comparator>
-__device__ void quicksort_shared(T* data, int n, Comparator cmp);
+__global__ void quicksort_shared(T* data, int n, Comparator cmp);
 
 // Host-side recursive sort driver (defined in blqs_impl.cu)
 template <typename T, typename Comparator>

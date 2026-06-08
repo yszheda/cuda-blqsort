@@ -8,12 +8,8 @@
 #include <iomanip>
 #include <random>
 
-// Include blqsort from cloned repo (path set via BLQS_INCLUDE_PATH)
-#ifndef BLQS_INCLUDE_PATH
-#define BLQS_INCLUDE_PATH "../../blqsort"
-#endif
-
-#include BLQS_INCLUDE_PATH "/blqs.h"
+// Include blqsort from cloned repo (include dir set via CMake)
+#include "blqs.h"
 
 template <typename T>
 void run_cpu_benchmark(const std::string& name, int n, int iterations = 5) {
