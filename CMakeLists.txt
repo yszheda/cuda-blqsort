@@ -88,8 +88,8 @@ add_executable(cuda_bench src/bench/cuda_bench.cu)
 target_link_libraries(cuda_bench PRIVATE cuda_blqsort CUDA::cudart)
 
 add_executable(cpu_bench src/bench/cpu_bench.cpp)
-target_compile_definitions(cpu_bench PRIVATE BLQS_INCLUDE_PATH="${PROJECT_SOURCE_DIR}/../blqsort")
-target_include_directories(cpu_bench PRIVATE "${PROJECT_SOURCE_DIR}/../blqsort")
+target_compile_definitions(cpu_bench PRIVATE BLQS_INCLUDE_PATH="${PROJECT_SOURCE_DIR}/../blqsort/cpp")
+target_include_directories(cpu_bench PRIVATE "${PROJECT_SOURCE_DIR}/../blqsort/cpp")
 target_link_libraries(cpu_bench PRIVATE CUDA::cudart)
 
 # ── Profiler target ──

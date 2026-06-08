@@ -17,7 +17,7 @@ __global__ void partition_kernel(
 
 // Forward kernel declarations (defined in block_sort.cu)
 template <typename T, int MaxSize, typename Comparator>
-__device__ void quicksort_shared(T* data, int n, Comparator cmp);
+__global__ void quicksort_shared(T* data, int n, Comparator cmp);
 
 // Forward radix sort driver (defined in radix_sort.cu)
 template <typename K, typename V>
