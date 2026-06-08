@@ -6,6 +6,9 @@
 #include "blqs_kernels.hpp"
 #include <type_traits>
 #include <stdexcept>
+#include <vector>
+
+using namespace blqs::detail;
 
 namespace blqs {
 
