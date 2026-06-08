@@ -270,7 +270,19 @@ void sort_by_key_stable(K* d_keys, V* d_values, int n) {
     if (d_keys == nullptr || d_values == nullptr)
         throw std::invalid_argument("sort_by_key_stable: keys or values is nullptr");
     if constexpr (std::is_arithmetic<K>::value) {
-        radix_sort_driver<K, V>(d_keys, d_values, n);
+        // Use host-side std::sort for stability (radix sort isn't stable with atomicAdd)
+        std::vector<K> h_k(n);
+        std::vector<V> h_v(n);
+        CUDA_CHECK(cudaMemcpy(h_k.data(), d_keys, n * sizeof(K), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(h_v.data(), d_values, n * sizeof(V), cudaMemcpyDeviceToHost));
+        std::vector<size_t> idx(n);
+        for (int i = 0; i < n; i++) idx[i] = i;
+        std::stable_sort(idx.begin(), idx.end(), [&h_k](size_t a, size_t b) { return h_k[a] < h_k[b]; });
+        std::vector<K> sk(n);
+        std::vector<V> sv(n);
+        for (int i = 0; i < n; i++) { sk[i] = h_k[idx[i]]; sv[i] = h_v[idx[i]]; }
+        CUDA_CHECK(cudaMemcpy(d_keys, sk.data(), n * sizeof(K), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_values, sv.data(), n * sizeof(V), cudaMemcpyHostToDevice));
     }
     CUDA_CHECK(cudaDeviceSynchronize());
 }
