@@ -3,7 +3,10 @@
 #pragma once
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
+#include <cstdint>
+#include <type_traits>
 #include "blqs_config.hpp"
+#include "blqs_errors.hpp"
 
 namespace blqs {
 namespace detail {
