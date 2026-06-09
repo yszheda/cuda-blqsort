@@ -13,7 +13,51 @@
 namespace blqs {
 namespace detail {
 
-// ── Partition Kernel: single global pivot, two-pass (count + scatter) ──────
+// ── Partition Kernel: single-pass (combined count + scatter) ──────
+// Eliminates the separate count kernel + D2H roundtrip
+
+template <typename T>
+__global__ void partition_kernel_single(
+    const T* input, T* output, int n, T pivot, int* d_less_start) {
+    __shared__ int s_less_count;
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n) return;
+
+    // Phase 1: Count local less/ge in shared memory
+    T val = input[tid];
+    int is_less = (val < pivot) ? 1 : 0;
+    int is_ge = 1 - is_less;
+
+    // Atomic add to get this thread's local count contribution
+    // Then use warp ballot for prefix sum within block
+    int lane = threadIdx.x & 31;
+    unsigned int less_mask = __ballot_sync(0xFFFFFFFF, is_less);
+    unsigned int ge_mask = __ballot_sync(0xFFFFFFFF, is_ge);
+
+    // Only warp leader does global atomic
+    if (lane == 0) {
+        int block_less = __popc(less_mask & 0xFFFFFFFF);
+        int pos = atomicAdd(d_less_start, block_less);
+        s_less_count = pos;
+    }
+    __syncthreads();
+
+    // Phase 2: Each thread computes its position and scatters
+    int rank_less = __popc(less_mask & ((1u << lane) - 1));
+    int rank_ge = __popc(ge_mask & ((1u << lane) - 1));
+
+    if (is_less) {
+        output[s_less_count + rank_less] = val;
+    } else {
+        // ge start = block_start + block_less
+        int block_start = (tid / blockDim.x) * blockDim.x;
+        int block_n = min((int)blockDim.x, n - block_start);
+        int block_less_total = __popc(less_mask & 0xFFFFFFFF);
+        output[s_less_count + block_less_total + rank_ge] = val;
+    }
+}
+
+// ── Old two-pass kernels (kept for compatibility) ──────────────
 
 // Pass 1: Count elements less than pivot (result in d_less_count)
 template <typename T>

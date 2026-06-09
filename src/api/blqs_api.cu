@@ -45,18 +45,23 @@ void do_sort_impl(T* d_data, T* d_buf, int n) {
         else pivot = h_samples[0];
     }
 
-    // Pass 1: count elements less than pivot
-    int h_less_count = 0;
-    int* d_less_count = nullptr;
-    CUDA_CHECK(cudaMalloc(&d_less_count, sizeof(int)));
-    CUDA_CHECK(cudaMemset(d_less_count, 0, sizeof(int)));
+    // Single-pass partition: scatter with atomic counters, read back count from atomic
+    int* d_lw = nullptr, *d_gw = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_lw, sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_gw, sizeof(int)));
+    CUDA_CHECK(cudaMemset(d_lw, 0, sizeof(int)));
+    CUDA_CHECK(cudaMemset(d_gw, 0, sizeof(int)));
 
     int threads = 256;
     int blocks = (n + threads - 1) / threads;
-    count_less_kernel<T><<<blocks, threads>>>(d_data, n, pivot, d_less_count);
+    partition_scatter_kernel<T><<<blocks, threads>>>(
+        d_data, d_buf, n, pivot, 0, d_lw, d_gw);
     CUDA_CHECK(cudaDeviceSynchronize());
-    CUDA_CHECK(cudaMemcpy(&h_less_count, d_less_count, sizeof(int), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaFree(d_less_count));
+
+    // Read back the less count from the atomic counter (avoids separate count kernel)
+    int h_less_count = 0;
+    CUDA_CHECK(cudaMemcpy(&h_less_count, d_lw, sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaFree(d_lw)); CUDA_CHECK(cudaFree(d_gw));
 
     // Handle degenerate: try alternate pivot, fallback to radix
     if (h_less_count == 0 || h_less_count == n) {
@@ -95,20 +100,6 @@ void do_sort_impl(T* d_data, T* d_buf, int n) {
         CUDA_CHECK(cudaMemcpy(d_data, h_data.data(), n * sizeof(T), cudaMemcpyHostToDevice));
         return;
     }
-
-    // Pass 2: scatter to temp buffer (avoid in-place read/write race)
-    int* d_lw = nullptr, *d_gw = nullptr;
-    CUDA_CHECK(cudaMalloc(&d_lw, sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&d_gw, sizeof(int)));
-    CUDA_CHECK(cudaMemset(d_lw, 0, sizeof(int)));
-    CUDA_CHECK(cudaMemset(d_gw, 0, sizeof(int)));
-
-    partition_scatter_kernel<T><<<blocks, threads>>>(
-        d_data, d_buf, n, pivot, h_less_count, d_lw, d_gw);
-    CUDA_CHECK(cudaDeviceSynchronize());
-    // Copy partitioned result back
-    CUDA_CHECK(cudaMemcpy(d_data, d_buf, n * sizeof(T), cudaMemcpyDeviceToDevice));
-    CUDA_CHECK(cudaFree(d_lw)); CUDA_CHECK(cudaFree(d_gw));
 
     // Recursively sort both halves
     do_sort_impl(d_data, d_buf, h_less_count);
