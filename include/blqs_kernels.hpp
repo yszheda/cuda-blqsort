@@ -209,6 +209,48 @@ __global__ void radix_sort_pass_kernel(
     }
 }
 
+// Multi-block radix sort: histogram phase (computes per-block digit counts)
+template <typename K, typename V>
+__global__ void radix_sort_histogram_kernel(
+    const K* in_k, int* block_hist, int n, int pass) {
+    __shared__ int s_cnt[RADIX_BINS];
+    if (threadIdx.x < RADIX_BINS) s_cnt[threadIdx.x] = 0;
+    __syncthreads();
+
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid < n) {
+        int d = get_radix_digit(in_k[tid], pass);
+        atomicAdd(&s_cnt[d], 1);
+    }
+    __syncthreads();
+
+    if (threadIdx.x < RADIX_BINS) {
+        block_hist[blockIdx.x * RADIX_BINS + threadIdx.x] = s_cnt[threadIdx.x];
+    }
+}
+
+// Multi-block radix sort: scatter phase using precomputed global offsets
+template <typename K, typename V>
+__global__ void radix_sort_scatter_kernel(
+    const K* in_k, const V* in_v, K* out_k, V* out_v,
+    const int* global_offsets, int n, int pass, int num_blocks_launch) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n) return;
+
+    int d = get_radix_digit(in_k[tid], pass);
+    // Compute position: global offset for digit + per-block offset + rank within block
+    int block_offset = global_offsets[blockIdx.x * RADIX_BINS + d];
+    int rank = 0;
+    // Count elements in this block with same digit before this thread
+    int block_start = blockIdx.x * blockDim.x;
+    int block_n = min((int)blockDim.x, n - block_start);
+    for (int i = 0; i < threadIdx.x && (block_start + i) < n; i++) {
+        if (get_radix_digit(in_k[block_start + i], pass) == d) rank++;
+    }
+    out_k[block_offset + rank] = in_k[tid];
+    if constexpr (!std::is_same<V, void>::value) out_v[block_offset + rank] = in_v[tid];
+}
+
 template <typename K, typename V>
 void radix_sort_driver(K* d_keys, V* d_values, int n) {
     if (n <= 1) return;
@@ -224,15 +266,62 @@ void radix_sort_driver(K* d_keys, V* d_values, int n) {
         CUDA_CHECK(cudaMemcpy(dv[0], d_values, n * sizeof(V), cudaMemcpyDeviceToDevice));
     }
 
-    // Use single block for correctness (avoids multi-block prefix sum issues)
-    int threads = (n < 1024) ? n : 1024;
-    int blocks = 1;
-    size_t smem = RADIX_BINS * 2 * sizeof(int);
-    for (int p = 0; p < passes; p++) {
-        int s = p % 2, d = 1 - s;
-        radix_sort_pass_kernel<K, V><<<blocks, threads, smem>>>(
-            dk[s], dv[s], dk[d], dv[d], n, p);
-        CUDA_CHECK(cudaDeviceSynchronize());
+    // Use multi-block for large arrays, single-block for small
+    int num_blocks = (n + 255) / 256;
+    if (num_blocks > 1) {
+        // Multi-block radix sort
+        std::vector<int> block_hist(num_blocks * RADIX_BINS);
+        std::vector<int> global_offsets(num_blocks * RADIX_BINS);
+        int* d_block_hist = nullptr;
+        int* d_global_offsets = nullptr;
+        CUDA_CHECK(cudaMalloc(&d_block_hist, num_blocks * RADIX_BINS * sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&d_global_offsets, num_blocks * RADIX_BINS * sizeof(int)));
+
+        size_t smem = RADIX_BINS * 2 * sizeof(int);
+        for (int p = 0; p < passes; p++) {
+            int s = p % 2, d = 1 - s;
+
+            // Phase 1: Compute block histograms
+            radix_sort_histogram_kernel<K, V><<<num_blocks, 256>>>(
+                dk[s], d_block_hist, n, p);
+            CUDA_CHECK(cudaDeviceSynchronize());
+
+            // Copy histograms to host
+            CUDA_CHECK(cudaMemcpy(block_hist.data(), d_block_hist,
+                num_blocks * RADIX_BINS * sizeof(int), cudaMemcpyDeviceToHost));
+
+            // Phase 2: Compute global offsets (prefix sum across blocks)
+            for (int digit = 0; digit < RADIX_BINS; digit++) {
+                int offset = 0;
+                for (int b = 0; b < num_blocks; b++) {
+                    global_offsets[b * RADIX_BINS + digit] = offset;
+                    offset += block_hist[b * RADIX_BINS + digit];
+                }
+            }
+
+            // Copy global offsets to device
+            CUDA_CHECK(cudaMemcpy(d_global_offsets, global_offsets.data(),
+                num_blocks * RADIX_BINS * sizeof(int), cudaMemcpyHostToDevice));
+
+            // Phase 3: Scatter
+            radix_sort_scatter_kernel<K, V><<<num_blocks, 256>>>(
+                dk[s], dv[s], dk[d], dv[d], d_global_offsets, n, p, num_blocks);
+            CUDA_CHECK(cudaDeviceSynchronize());
+        }
+
+        CUDA_CHECK(cudaFree(d_block_hist));
+        CUDA_CHECK(cudaFree(d_global_offsets));
+    } else {
+        // Single-block for small arrays
+        int threads = (n < 1024) ? n : 1024;
+        int blocks = 1;
+        size_t smem = RADIX_BINS * 2 * sizeof(int);
+        for (int p = 0; p < passes; p++) {
+            int s = p % 2, d = 1 - s;
+            radix_sort_pass_kernel<K, V><<<blocks, threads, smem>>>(
+                dk[s], dv[s], dk[d], dv[d], n, p);
+            CUDA_CHECK(cudaDeviceSynchronize());
+        }
     }
 
     int last = passes % 2;
