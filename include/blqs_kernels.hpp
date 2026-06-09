@@ -92,14 +92,79 @@ __device__ T partition_block_dev(T* data, int low, int high) {
     return i + 1;
 }
 
-template <typename T, int MaxSize = 1024>
+// Cooperative multi-thread partition kernel
+// All 256 threads participate: count -> prefix sum -> scatter -> copy back
+template <typename T, int MaxSize = 256>
+__device__ void cooperative_partition(T* sdata, int low, int high) {
+    extern __shared__ char smem_raw[];
+    T* temp = sdata + MaxSize;  // temp buffer after sdata
+    int block_threads = blockDim.x;
+    int n = high - low + 1;
+    T pivot = sdata[high];
+    int tid = threadIdx.x;
+
+    // Phase 1: Each thread counts elements < pivot in its stride
+    __shared__ int less_cnt[256];
+    __shared__ int ge_cnt[256];
+    int lc = 0, gc = 0;
+    for (int i = tid; i < n; i += block_threads) {
+        if (sdata[low + i] < pivot) lc++;
+        else gc++;
+    }
+    less_cnt[tid] = lc;
+    ge_cnt[tid] = gc;
+    __syncthreads();
+
+    // Phase 2: Thread 0 computes prefix sums for per-thread offsets
+    __shared__ int less_off[256];   // starting offset in "less" region for each thread
+    __shared__ int ge_off[256];     // starting offset in "ge" region for each thread
+    __shared__ int total_less_val;
+    if (tid == 0) {
+        less_off[0] = 0;
+        ge_off[0] = 0;
+        for (int t = 1; t < block_threads; t++) {
+            less_off[t] = less_off[t - 1] + less_cnt[t - 1];
+            ge_off[t] = ge_off[t - 1] + ge_cnt[t - 1];
+        }
+        total_less_val = less_off[block_threads - 1] + less_cnt[block_threads - 1];
+    }
+    __syncthreads();
+
+    // Phase 3: All threads scatter to temp buffer cooperatively
+    // Each thread uses a LOCAL counter initialized from prefix sum offset
+    // Key fix: increment pos by 1 for each element (not block_threads)
+    int less_pos = less_off[tid];  // local counter, starts at precomputed offset
+    int ge_pos = ge_off[tid];      // local counter for ge region
+    for (int i = tid; i < n; i += block_threads) {
+        T val = sdata[low + i];
+        if (val < pivot) {
+            temp[less_pos] = val;  // place at current position
+            less_pos++;             // increment by 1 (NOT block_threads!)
+        } else {
+            temp[total_less_val + ge_pos] = val;
+            ge_pos++;              // increment by 1
+        }
+    }
+    __syncthreads();
+
+    // Phase 4: All threads copy back cooperatively
+    for (int i = tid; i < n; i += block_threads) {
+        sdata[low + i] = temp[i];
+    }
+    __syncthreads();
+}
+
+template <typename T, int MaxSize = 256>
 __global__ void quicksort_shared_kernel(T* data, int n) {
-    __shared__ T sdata[MaxSize];
+    // Shared memory layout: sdata[MaxSize] + temp[MaxSize]
+    extern __shared__ char smem_raw[];
+    T* sdata = reinterpret_cast<T*>(smem_raw);
     int tid = threadIdx.x;
     if (tid < n) sdata[tid] = data[tid];
     __syncthreads();
 
-    // Thread 0 performs the sort in shared memory
+    // Thread 0 manages the quicksort stack
+    // Partition step uses all 256 threads cooperatively
     if (tid == 0) {
         constexpr int STACK_DEPTH = 20;
         int s_low[STACK_DEPTH], s_high[STACK_DEPTH], top = -1;
@@ -112,7 +177,14 @@ __global__ void quicksort_shared_kernel(T* data, int n) {
                 insertion_sort_dev(sdata + lo, hi - lo + 1);
                 continue;
             }
-            int pi = partition_block_dev(sdata, lo, hi);
+            // Cooperative partition: all threads participate
+            cooperative_partition<T, MaxSize>(sdata, lo, hi);
+            // Find pivot position after partition
+            T pivot = sdata[hi];
+            int pi = lo;
+            for (int j = lo; j < hi; j++) {
+                if (sdata[j] < pivot) pi++;
+            }
             s_low[++top] = lo; s_high[top] = pi - 1;
             s_low[++top] = pi + 1; s_high[top] = hi;
         }

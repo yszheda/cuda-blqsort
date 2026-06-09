@@ -21,7 +21,8 @@ void do_sort_impl(T* d_data, T* d_buf, int n) {
     // Small arrays: single-block shared-memory quicksort
     if (n <= BLOCK_SIZE) {
         int threads = (n < BLOCK_SIZE) ? n : BLOCK_SIZE;
-        quicksort_shared_kernel<T, 1024><<<1, threads>>>(d_data, n);
+        size_t smem = 2 * 256 * sizeof(T);  // sdata[256] + temp[256]
+        quicksort_shared_kernel<T, 256><<<1, threads, smem>>>(d_data, n);
         CUDA_CHECK(cudaDeviceSynchronize());
         CUDA_CHECK(cudaGetLastError());
         return;
