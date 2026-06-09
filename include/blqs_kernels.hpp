@@ -99,7 +99,7 @@ __global__ void quicksort_shared_kernel(T* data, int n) {
     if (tid < n) sdata[tid] = data[tid];
     __syncthreads();
 
-    // Only thread 0 performs the sort in shared memory
+    // Thread 0 performs the sort in shared memory
     if (tid == 0) {
         constexpr int STACK_DEPTH = 20;
         int s_low[STACK_DEPTH], s_high[STACK_DEPTH], top = -1;
@@ -131,7 +131,7 @@ __global__ void kv_block_sort_kernel(K* keys, V* values, int n) {
     if (tid < n) { sk[tid] = keys[tid]; sv[tid] = values[tid]; }
     __syncthreads();
 
-    // Only thread 0 sorts
+    // Thread 0 sorts
     if (tid == 0) {
         constexpr int STACK_DEPTH = 20;
         int sl[STACK_DEPTH], sh[STACK_DEPTH], top = -1;
