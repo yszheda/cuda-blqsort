@@ -21,8 +21,7 @@ void do_sort_impl(T* d_data, T* d_buf, int n) {
     // Small arrays: single-block shared-memory quicksort
     if (n <= BLOCK_SIZE) {
         int threads = (n < BLOCK_SIZE) ? n : BLOCK_SIZE;
-        size_t smem = 2 * 256 * sizeof(T);  // sdata[256] + temp[256]
-        quicksort_shared_kernel<T, 256><<<1, threads, smem>>>(d_data, n);
+        quicksort_shared_kernel<T, 1024><<<1, threads>>>(d_data, n);
         CUDA_CHECK(cudaDeviceSynchronize());
         CUDA_CHECK(cudaGetLastError());
         return;
@@ -45,23 +44,18 @@ void do_sort_impl(T* d_data, T* d_buf, int n) {
         else pivot = h_samples[0];
     }
 
-    // Single-pass partition: scatter with atomic counters, read back count from atomic
-    int* d_lw = nullptr, *d_gw = nullptr;
-    CUDA_CHECK(cudaMalloc(&d_lw, sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&d_gw, sizeof(int)));
-    CUDA_CHECK(cudaMemset(d_lw, 0, sizeof(int)));
-    CUDA_CHECK(cudaMemset(d_gw, 0, sizeof(int)));
+    // Pass 1: count elements less than pivot
+    int h_less_count = 0;
+    int* d_less_count = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_less_count, sizeof(int)));
+    CUDA_CHECK(cudaMemset(d_less_count, 0, sizeof(int)));
 
     int threads = 256;
     int blocks = (n + threads - 1) / threads;
-    partition_scatter_kernel<T><<<blocks, threads>>>(
-        d_data, d_buf, n, pivot, 0, d_lw, d_gw);
+    count_less_kernel<T><<<blocks, threads>>>(d_data, n, pivot, d_less_count);
     CUDA_CHECK(cudaDeviceSynchronize());
-
-    // Read back the less count from the atomic counter (avoids separate count kernel)
-    int h_less_count = 0;
-    CUDA_CHECK(cudaMemcpy(&h_less_count, d_lw, sizeof(int), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaFree(d_lw)); CUDA_CHECK(cudaFree(d_gw));
+    CUDA_CHECK(cudaMemcpy(&h_less_count, d_less_count, sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaFree(d_less_count));
 
     // Handle degenerate: try alternate pivot, fallback to radix
     if (h_less_count == 0 || h_less_count == n) {
@@ -100,6 +94,20 @@ void do_sort_impl(T* d_data, T* d_buf, int n) {
         CUDA_CHECK(cudaMemcpy(d_data, h_data.data(), n * sizeof(T), cudaMemcpyHostToDevice));
         return;
     }
+
+    // Pass 2: scatter to temp buffer (avoid in-place read/write race)
+    int* d_lw = nullptr, *d_gw = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_lw, sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_gw, sizeof(int)));
+    CUDA_CHECK(cudaMemset(d_lw, 0, sizeof(int)));
+    CUDA_CHECK(cudaMemset(d_gw, 0, sizeof(int)));
+
+    partition_scatter_kernel<T><<<blocks, threads>>>(
+        d_data, d_buf, n, pivot, h_less_count, d_lw, d_gw);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // Copy partitioned result back
+    CUDA_CHECK(cudaMemcpy(d_data, d_buf, n * sizeof(T), cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaFree(d_lw)); CUDA_CHECK(cudaFree(d_gw));
 
     // Recursively sort both halves
     do_sort_impl(d_data, d_buf, h_less_count);
