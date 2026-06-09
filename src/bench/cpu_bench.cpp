@@ -9,7 +9,7 @@
 #include <random>
 
 // Include blqsort from cloned repo (include dir set via CMake)
-#include "blqs.h"
+#include "blqs.hpp"
 
 template <typename T>
 void run_cpu_benchmark(const std::string& name, int n, int iterations = 5) {
